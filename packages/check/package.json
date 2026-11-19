@@ -1,0 +1,22 @@
+{
+	"name": "@frankstack/check",
+	"description": "Walks every path through a stack definition and reports where it cannot run its course",
+	"version": "0.0.0",
+	"private": true,
+	"license": "MIT",
+	"type": "module",
+	"bin": {
+		"frankstack-check": "./src/cli.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"check": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.3.0",
+		"typescript": "^5.4.0"
+	},
+	"engines": {
+		"bun": ">=1.3.0"
+	}
+}
