@@ -1,0 +1,27 @@
+name: Bug Report
+description: Report a bug
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: The page URL or the exact command, and the stack definition if one is involved.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Frankstack commit
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser or Bun version, and the agent harness you assemble into.
