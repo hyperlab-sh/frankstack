@@ -1,0 +1,8 @@
+// The comparison lives under /learn. The server answers "/" with a redirect (nginx.conf); this page
+// covers the dev server and any static host that serves the file as is.
+<p>
+  Frankstack: <a href="/learn/">how published agent stacks run their loop</a>.
+</p>
+<script>
+  location.replace("/learn/");
+</script>
