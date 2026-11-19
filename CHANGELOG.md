@@ -10,3 +10,5 @@ released yet, so there are no version numbers.
 ### Added
 
 - Repository scaffolding.
+- The website in `apps/site`: the comparison of six agent stacks at `/learn/` and the pstack
+  playbooks at `/learn/pstack/playbooks/`, moved here from the hyper-coding repository.

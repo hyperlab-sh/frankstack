@@ -20,3 +20,13 @@ jobs:
 
       - name: Lint and format (Biome)
         run: bun run lint
+
+      - name: Build
+        run: bun run build
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # The site tests read the built pages, so they run after the build.
+      - name: Test
+        run: bun run test
