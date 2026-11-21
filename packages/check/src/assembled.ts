@@ -11,6 +11,9 @@ type Hunk = { from: number; removed: number; to: number; added: number };
 /** The hunks of `diff -U0 source output`. */
 function hunks(source: string, output: string): Hunk[] {
 	const run = Bun.spawnSync(["diff", "-U0", source, output]);
+	// 0 is no difference and 1 is differences; anything else means `diff` did not compare the files.
+	if (run.exitCode > 1)
+		throw new Error(`diff ${source} ${output} failed: ${run.stderr.toString().trim()}`);
 	const count = (text: string | undefined) => (text === undefined ? 1 : Number(text));
 	return [...run.stdout.toString().matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)].map(
 		(match) => ({
