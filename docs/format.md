@@ -108,6 +108,11 @@ touches:
     lines: "41-58"                        # one range, or several: "12, 41-58"
     what: Reads the task text from the plan file and ticks a todo-list entry when done.
     verbs: [read-task, mark-done]
+  - component: Executor
+    impl: subagent                        # the stack's own choice: the text stays...
+    lines: "140-146"
+    what: The final message is a short status report.
+    change: Add a last bullet for the `OUTCOME:` line.   # ...unless `change` says what to do
   - component: Handoff
     impl: prose-next-skill
     lines: "112-118"
@@ -127,12 +132,19 @@ Rules for the annotator:
   are 1-based and inclusive, in the file under `sources/`.
 - Record every touch, including the ones the chosen implementation leaves unchanged (`impl`
   equal to the stack's choice): they say what the block relies on.
+- A touch written for the chosen implementation is left alone by the assembler. When its text
+  must still change for this stack (a block that reports a status where the stack wants an
+  outcome line), give the touch a `change` key: one or two sentences that say exactly what to
+  do. The assembler does that and nothing more.
+- In a Handoff touch, `what` says which words pass control and what outcome the block reports
+  in their place. The assembler replaces those words and keeps the rest of the lines.
 - Text that names another skill, agent or command of the home stack is a Handoff touch when it
   passes control, and goes under `refers` (a list of `{ name, lines }`) when it only mentions it.
 - A dependency that fits no listed component goes under `other` (a list of `{ file, lines, what }`)
   with a sentence. Do not invent a component for it.
-- The assembler may change a source line only where a touch, a `refers` entry or an `other` entry
-  covers it. A line you leave out is a line it must keep.
+- The assembler may change a source line only where a touch of a replaced implementation, a
+  touch with `change`, a `refers` entry or an `other` entry covers it. A line you leave out is a
+  line it must keep.
 - Outcomes are the ways the block can end. Use the block's own word when it has one
   (`DONE_WITH_CONCERNS` becomes `done-with-concerns`). Most published blocks end in prose with no
   name: give each distinct ending a short name and say in the notes which sentence it stands for.
