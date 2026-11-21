@@ -187,8 +187,15 @@ export async function checkAssembled(dir: string, flat: Flat, bundle: Bundle): P
 						`${at}: \`${whole}\` refers to the stack the block came from${own ? " (the source's own line, covered by no touch)" : ""}`,
 						own ? "warning" : "error",
 					);
-				} else if (owner === plugin && !text.has(`skills/${name}/SKILL.md`))
-					add("unresolved-handoff", `${at}: \`${whole}\` is not a skill of this plugin`);
+				} else if (
+					owner === plugin &&
+					!text.has(`skills/${name}/SKILL.md`) &&
+					!text.has(`agents/${name}.md`)
+				)
+					add(
+						"unresolved-handoff",
+						`${at}: \`${whole}\` is not a skill or an agent of this plugin`,
+					);
 			}
 		});
 	}
@@ -239,7 +246,15 @@ export async function checkAssembled(dir: string, flat: Flat, bundle: Bundle): P
 		const covered = [...annotation.touches, ...annotation.mentions]
 			.filter((entry) => (entry.file ?? main) === from.source)
 			.flatMap((entry) => ranges(entry.lines))
-			.map(([first, last]) => [first - 1, last + 1] as const);
+			.map(([first, last]) => [first - 1, last + 1] as [number, number])
+			.sort((a, b) => a[0] - b[0])
+			// Touches one line apart (a blank line between them) cover one stretch: a change may span both.
+			.reduce<[number, number][]>((merged, range) => {
+				const last = merged.at(-1);
+				if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+				else merged.push(range);
+				return merged;
+			}, []);
 		// The installed name is the stack's choice, so a new `name` in the frontmatter is expected.
 		const sourceLines = (await Bun.file(source).text()).split("\n");
 		const head = sourceLines[0] === "---" ? sourceLines.indexOf("---", 1) : 0;

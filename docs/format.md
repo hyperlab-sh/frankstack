@@ -71,8 +71,9 @@ Rules:
 - **Artifacts** belong to the level that names them. `child:<name>` is the artifact one level
   down, `parent:<name>` one level up. Names listed under `inputs` or `artifacts` belong to the
   whole stack. A new child starts with nothing but what its parent wrote for it with `child:`.
-- **Bounds.** `max: n` lets the route be taken n times in one pass of its level; after that the
-  outcome leads to `then`. Starting a new child resets the bounds below it.
+- **Bounds.** `max: n` lets the route be taken n times while its level's loop runs; after that
+  the outcome leads to `then`. A route with `resets: [step.outcome]` sets those counters of the
+  same level back to 0. Starting a child starts its counters at 0.
 - **Outcomes.** A block reports an outcome and stops. It never names the next block; the lead
   skill routes. A cell that uses a block routes the names that block's annotation declares (case
   and `_`/`-` do not matter). For the step with `children`, the block's first-end name (`done`)

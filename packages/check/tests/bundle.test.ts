@@ -270,6 +270,21 @@ describe("assembled plugin", () => {
 			"`agents/reviewer.md` changes lines of `sources/away/review.md` that no touch covers: 6",
 		]);
 	});
+	test("one change across two touches a blank line apart is covered", async () => {
+		const source =
+			"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nRead the bead.\n\nClose the bead.\n\nAnswer pass or fail.\n";
+		const output =
+			"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nRead the task and mark it done.\n\nAnswer pass or fail.\nEnd with `OUTCOME: pass` or `OUTCOME: fail`.\n";
+		const annotation = (lines: string[]) =>
+			`---\nblock: away/review\nkind: agent\nfiles: [sources/away/review.md]\noutcomes: [pass, fail]\nother:\n${lines.map((l) => `  - { lines: "${l}" }\n`).join("")}---\n`;
+		const run = (lines: string[]) =>
+			assembled(
+				{ "agents/reviewer.md": output },
+				{ "sources/away/review.md": source, "blocks/away/review.md": annotation(lines) },
+			);
+		expect(await run(["6", "8"])).toEqual([]);
+		expect((await run(["6"])).map((f) => f.rule)).toEqual(["uncovered-change"]);
+	});
 	test("a change outside the annotated lines is listed for review", async () => {
 		const findings = await assembled({
 			"skills/plan/SKILL.md": (plugin["skills/plan/SKILL.md"] ?? "").replace(
@@ -303,6 +318,19 @@ describe("assembled plugin", () => {
 			),
 		});
 		expect(rulesOf(findings)).toContain("unresolved-handoff");
+	});
+	test("the plugin's own skills and agents may be named with its prefix", async () => {
+		const lead = plugin["skills/loop/SKILL.md"] ?? "";
+		const named = await assembled({
+			"skills/loop/SKILL.md": `${lead}Invoke mini:plan, then start the agent mini:reviewer.\n`,
+		});
+		expect(named).toEqual([]);
+		const unknown = await assembled({
+			"skills/loop/SKILL.md": `${lead}Start the agent mini:nobody.\n`,
+		});
+		expect(unknown.map((f) => f.message)).toEqual([
+			`\`skills/loop/SKILL.md\` line ${lead.split("\n").length}: \`mini:nobody\` is not a skill or an agent of this plugin`,
+		]);
 	});
 	test("a block that never reports an outcome", async () => {
 		const findings = await assembled({
