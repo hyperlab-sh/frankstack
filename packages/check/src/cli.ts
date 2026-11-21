@@ -49,13 +49,22 @@ async function main(args: string[]): Promise<number> {
 		return 64;
 	}
 	const flag = args.indexOf("--bundle");
-	const bundleDir =
-		command === "assembled" ? args[flag + 1] : statSync(target).isDirectory() ? target : undefined;
-	if (command === "assembled" && (flag < 0 || !bundleDir)) {
+	if (command === "assembled" && (flag < 0 || !args[flag + 1])) {
 		console.error(USAGE);
 		return 64;
 	}
+	const isDir = (path: string) => statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false;
+	const bundleDir = command === "assembled" ? args[flag + 1] : isDir(target) ? target : undefined;
 	const stackFile = bundleDir ? join(bundleDir, "stack.yaml") : target;
+	for (const [path, dir] of [
+		[stackFile, false],
+		...(command === "assembled" ? [[target, true] as const] : []),
+	] as const) {
+		if (dir ? !isDir(path) : !(await Bun.file(path).exists())) {
+			console.error(`${path}: no such ${dir ? "folder" : "file"}`);
+			return 64;
+		}
+	}
 	const { flat, findings } = loadStack(await Bun.file(stackFile).text());
 	if (!flat) return report(findings);
 	if (command === "expand") {

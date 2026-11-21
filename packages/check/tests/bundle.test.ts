@@ -318,3 +318,26 @@ describe("assembled plugin", () => {
 		expect(rulesOf(await assembled({ "assembly.json": null }))).toContain("missing-file");
 	});
 });
+
+describe("command line", () => {
+	const cli = join(import.meta.dir, "../src/cli.ts");
+	const run = (...args: string[]) => {
+		const result = Bun.spawnSync(["bun", cli, ...args]);
+		return { code: result.exitCode, err: result.stderr.toString() };
+	};
+	test("a stack file that does not exist is a usage error, not a crash", () => {
+		const { code, err } = run("stack", "/nowhere/stack.yaml");
+		expect(code).toBe(64);
+		expect(err).toContain("/nowhere/stack.yaml: no such file");
+	});
+	test("a bundle folder or plugin folder that does not exist is a usage error", () => {
+		expect(run("assembled", "/nowhere/plugin", "--bundle", "/nowhere/bundle")).toEqual({
+			code: 64,
+			err: "/nowhere/bundle/stack.yaml: no such file\n",
+		});
+	});
+	test("`assembled` without a bundle prints the usage", () => {
+		expect(run("assembled", "/nowhere/plugin").code).toBe(64);
+		expect(run("assembled", "/nowhere/plugin", "--bundle").code).toBe(64);
+	});
+});
