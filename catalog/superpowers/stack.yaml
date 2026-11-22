@@ -1,0 +1,10 @@
+repository: obra/superpowers
+commit: "22f0b463e7a5e579904dd6211a520321035526f7"
+licence: MIT
+imported: 2026-11-22
+pending:
+  subagent-driven-development: skills/subagent-driven-development
+  brainstorming: skills/brainstorming
+  task-brief: skills/subagent-driven-development/scripts/task-brief
+  review-package: skills/subagent-driven-development/scripts/review-package
+  writing-skills: skills/writing-skills
