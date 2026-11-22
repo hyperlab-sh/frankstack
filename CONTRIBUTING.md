@@ -29,8 +29,9 @@ bun run lint
 - TypeScript, strict mode. Biome enforces lint and format; run `bun run lint:fix` before committing.
 - Full words in identifiers. `service`, not `svc`.
 - No default values for environment variables that must be set. Throw if missing.
-- The repository never contains another project's files. A block is referenced by repository,
-  commit and path.
+- Another project's files are in one place only: `catalog/<stack>/`, as marked copies with the
+  stack's `LICENSE` beside them, and only when that licence allows copying and changing them
+  (`docs/catalog.md`). A bundle built by hand for a test is not committed.
 
 ## Pull requests
 

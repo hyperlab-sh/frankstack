@@ -27,17 +27,19 @@ with every claim linked to the file and line that shows it. It will be served at
 
 ## How it is meant to work
 
-1. **Pick blocks.** A block is a skill, playbook, agent, hook or step from a published stack.
-2. **Pick one component per type.** Blocks depend on shared conventions: where tasks are stored,
-   where learnings are kept, how control passes to the next block. You choose each once for the
-   whole stack, and it need not be the one a block was written for.
-3. **Get a bundle.** Frankstack describes, for every block, each place it touches a component, what
-   it reads and writes, and where it can loop back.
-4. **Your agent assembles it.** It rewrites the original blocks to your choices and installs the
-   result. From then on the stack is yours to change.
-5. **Check it.** Before and after assembly, Frankstack walks every path through the stack and
+1. **Pick blocks.** A block is a skill, agent, prompt, script, hook, playbook or resource from a
+   published stack. You can also bring a file of your own, or describe a block for your agent to
+   write.
+2. **Settle what the blocks need.** Blocks rely on shared concepts: where tasks are stored, where
+   lessons are kept, how a block says it has finished. You choose the block that provides each
+   one, once, and it need not be the one a block was written for.
+3. **Get a bundle.** Every block comes with marks at the places where its text names another
+   block, uses a concept or passes control. One file holds every choice you made.
+4. **Your agent assembles it.** It replaces what the marks point at with what you chose and
+   installs the result. From then on it is yours to change.
+5. **Check it.** Before and after assembly, Frankstack walks every path through each flow and
    reports, with the path, any step that reads something no earlier step wrote, any loop with no
-   bound, any outcome that leads nowhere, and any leftover of a component the stack does not use.
+   bound, any outcome that leads nowhere, and any leftover of a provider you did not choose.
 
 Frankstack does not run your loop, and it does not judge how well a stack performs. It makes stacks
 cheap to compose so you can try them.
@@ -46,6 +48,7 @@ cheap to compose so you can try them.
 
 - `apps/site`: the website (Marko Run, static build).
 - `packages/`: the checker and other tooling, as they are written.
+- `docs/`: the bundle format, the language and the catalog.
 
 ## Contributing
 

@@ -7,6 +7,7 @@ that the user's own agent assembles. Frankstack is not a runtime and does not ju
 
 - `apps/site`: the website (Marko Run, static build). Comparison pages live under `/learn`.
 - `packages/`: tooling (the checker).
+- `docs/`: the bundle format, the language, the catalog.
 
 ## Commands
 
@@ -25,6 +26,8 @@ bun run test       # CI only; locally run the affected tests (see below)
 - Biome for JS, TS and JSON; tabs.
 - Run only the tests your change affects. In `apps/site`: `bun run build`, then
   `bunx vitest related <changed files> --run` (the site tests read `dist/public`).
-- Never commit another project's files. A block is referenced by repository, commit and path.
+- Another project's files are committed in one place only: `catalog/<stack>/`, as marked copies
+  with the stack's `LICENSE` beside them, and only when that licence allows copying and changing
+  them (`docs/catalog.md`). A bundle built by hand for a test is not committed.
 - Environment variables that are required have no defaults; missing ones throw.
 - Commits: `type(scope): summary` (Conventional Commits).
