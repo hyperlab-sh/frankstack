@@ -19,7 +19,8 @@ licenses/<stack>/LICENSE  the licence of each stack a block was taken from
 Three kinds of content, never mixed in one file:
 
 - **The same in every bundle**: `AGENTS.md`, `CLAUDE.md`, `ASSEMBLE.md`, `FORMAT.md`,
-  `LANGUAGE.md`, and a target's file.
+  `LANGUAGE.md`, and a target's file. Their source is `docs/bundle/`, this file and
+  `docs/language.md`.
 - **Catalog data**: the folder of a catalog block and `licenses/`. A copy, unchanged. It says
   nothing about this bundle.
 - **The person's**: `README.md`, `bundle.yaml`, and the folder of an imported block.
