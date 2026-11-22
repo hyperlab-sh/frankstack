@@ -49,9 +49,11 @@ export type Edge = {
 	resets: string[];
 };
 
+/** The component the stack uses for one type (`Memory`, `TaskStorage`, ...). */
 export type Component = {
-	impl: string;
-	replaces: string[];
+	/** Bundle-relative path of its card: `components/<Type>/<name>.md`. */
+	use: string;
+	name: string;
 	capabilities: Map<string, CapabilityLevel>;
 };
 
@@ -66,6 +68,10 @@ export type Flat = {
 	crossRun: Set<string>;
 	components: Map<string, Component>;
 	blocks: Map<string, BlockUse>;
+	/** Where an artifact is kept: keyed `name@level`, or `name` when one path serves every level. */
+	paths: Map<string, string>;
+	/** Levels the lead does not run: level name to the block that runs it. */
+	inside: Map<string, string>;
 	nodes: Map<string, Node>;
 	edges: Edge[];
 };
@@ -76,11 +82,18 @@ export type Annotation = {
 	files: string[];
 	outcomes: string[];
 	parts: Map<string, { lines: string; outcomes: string[] }>;
-	touches: { component: string; impl: string; file?: string; lines: string }[];
+	/** `component` is the path of the card the text was written for. */
+	touches: { component: string; file?: string; lines: string }[];
 	/** Lines listed under `refers` and `other`: text the assembler may also have to change. */
 	mentions: { file?: string; lines: string }[];
 	needs: string[];
 	rewrite?: string;
 };
 
-export type Card = { component: string; impl: string; status: string; fingerprints: string[] };
+export type Card = {
+	path: string;
+	type: string;
+	name: string;
+	capabilities: Map<string, CapabilityLevel>;
+	fingerprints: string[];
+};

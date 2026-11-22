@@ -20,11 +20,14 @@ type RawRoute = {
 
 const TOP_KEYS = [
 	"name",
+	"description",
 	"levels",
+	"inside",
 	"start",
 	"ends",
 	"inputs",
 	"artifacts",
+	"files",
 	"components",
 	"blocks",
 	"around",
@@ -44,17 +47,28 @@ const STEP_KEYS = [
 	"at",
 ];
 const ROUTE_KEYS = ["to", "max", "then", "releases", "resets"];
-const LEVELS: CapabilityLevel[] = ["native", "emulated", "missing"];
 
 export const NEXT_CHILD = "next-child";
 export const ALL_DONE = "all-done";
 
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+/** The type and name in a card path, `components/<Type>/<name>.md`. */
+export const cardRef = (path: string): { type: string; name: string } | undefined => {
+	const match = /^components\/([^/]+)\/([^/]+)\.md$/.exec(path);
+	return match ? { type: match[1] ?? "", name: match[2] ?? "" } : undefined;
+};
 const strs = (v: unknown): string[] =>
 	Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 
 /** Reads a stack file and writes its levels out into one flat graph. */
-export function loadStack(text: string): { flat?: Flat; findings: Finding[] } {
+/**
+ * `cards` gives the capabilities each component card declares, keyed by card path. Without it the
+ * components are taken as written and declare nothing.
+ */
+export function loadStack(
+	text: string,
+	cards?: Map<string, Map<string, CapabilityLevel>>,
+): { flat?: Flat; findings: Finding[] } {
 	const findings: Finding[] = [];
 	const invalid = (message: string) => {
 		findings.push({ rule: "invalid", severity: "error", message });
@@ -102,20 +116,15 @@ export function loadStack(text: string): { flat?: Flat; findings: Finding[] } {
 
 	const components = new Map<string, Component>();
 	for (const [id, value] of Object.entries(isObj(doc.components) ? doc.components : {})) {
-		if (!isObj(value) || typeof value.impl !== "string") {
-			invalid(`component \`${id}\` needs \`impl\``);
+		const ref = typeof value === "string" ? cardRef(value) : undefined;
+		if (typeof value !== "string" || !ref) {
+			invalid(`component type \`${id}\` names its card: \`components/${id}/<name>.md\``);
 			continue;
 		}
-		const capabilities = new Map<string, CapabilityLevel>();
-		for (const [cap, level] of Object.entries(
-			isObj(value.capabilities) ? value.capabilities : {},
-		)) {
-			if (LEVELS.includes(level as CapabilityLevel))
-				capabilities.set(cap, level as CapabilityLevel);
-			else
-				invalid(`component \`${id}\`: capability \`${cap}\` must be native, emulated or missing`);
-		}
-		components.set(id, { impl: value.impl, replaces: strs(value.replaces), capabilities });
+		if (ref.type !== id) invalid(`component type \`${id}\` names a card of type \`${ref.type}\``);
+		const card = cards?.get(value);
+		if (cards && !card) invalid(`component type \`${id}\`: card \`${value}\` is not in the bundle`);
+		components.set(id, { use: value, name: ref.name, capabilities: card ?? new Map() });
 	}
 
 	const blocks = new Map<string, BlockUse>();
@@ -135,6 +144,32 @@ export function loadStack(text: string): { flat?: Flat; findings: Finding[] } {
 		const id = ref.split("#")[0] ?? ref;
 		if (!blocks.has(id)) invalid(`${where}: block \`${id}\` is not listed under \`blocks\``);
 	};
+	const paths = new Map<string, string>();
+	for (const [artifact, value] of Object.entries(isObj(doc.files) ? doc.files : {})) {
+		if (typeof value === "string") {
+			paths.set(artifact, value);
+			continue;
+		}
+		if (!isObj(value)) {
+			invalid(`files.${artifact}: a path, or a mapping of level to path`);
+			continue;
+		}
+		for (const [level, path] of Object.entries(value)) {
+			if (!levels.includes(level)) invalid(`files.${artifact}: unknown level \`${level}\``);
+			else if (typeof path !== "string") invalid(`files.${artifact}.${level}: must be a path`);
+			else paths.set(`${artifact}@${level}`, path);
+		}
+	}
+	const inside = new Map<string, string>();
+	for (const [level, block] of Object.entries(isObj(doc.inside) ? doc.inside : {})) {
+		if (levels.indexOf(level) < 1)
+			invalid(`inside: \`${level}\` is not a level below the outermost`);
+		else if (typeof block !== "string") invalid(`inside.${level}: must name a block`);
+		else {
+			knownBlock(block, `inside.${level}`);
+			inside.set(level, block);
+		}
+	}
 	for (const entry of Array.isArray(doc.around) ? doc.around : []) {
 		if (isObj(entry) && typeof entry.block === "string") knownBlock(entry.block, "around");
 		else invalid("each entry of `around` needs `block`");
@@ -455,7 +490,20 @@ export function loadStack(text: string): { flat?: Flat; findings: Finding[] } {
 	const first = target(start, 0, "start");
 	if (first === undefined || findings.some((f) => f.rule === "invalid")) return { findings };
 	return {
-		flat: { name, levels, start: first, ends, inputs, crossRun, components, blocks, nodes, edges },
+		flat: {
+			name,
+			levels,
+			start: first,
+			ends,
+			inputs,
+			crossRun,
+			components,
+			blocks,
+			paths,
+			inside,
+			nodes,
+			edges,
+		},
 		findings,
 	};
 }

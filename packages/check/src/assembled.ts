@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { type Bundle, frontmatter, walk } from "./bundle.ts";
+import { cardRef } from "./load.ts";
 import type { Finding, Flat } from "./types.ts";
 
 const TEXT = /\.(md|ya?ml|json|sh|txt)$|^[^.]*$/;
@@ -114,12 +115,12 @@ export async function checkAssembled(dir: string, flat: Flat, bundle: Bundle): P
 		}
 	}
 
-	// Leftovers of replaced implementations, and references that lead nowhere.
-	const replaced = bundle.cards.filter(
-		(card) =>
-			card.status === "replaced" &&
-			flat.components.get(card.component)?.replaces.includes(card.impl),
-	);
+	// Leftovers of components the stack does not use, and references that lead nowhere.
+	const unused = (card: string): boolean => {
+		const used = flat.components.get(cardRef(card)?.type ?? "")?.use;
+		return used !== undefined && used !== card;
+	};
+	const replaced = bundle.cards.filter((card) => unused(card.path));
 	const homes = new Set([...flat.blocks.keys()].map((id) => id.split("/")[0] ?? ""));
 	homes.delete(plugin);
 	for (const [path, body] of text) {
@@ -131,12 +132,10 @@ export async function checkAssembled(dir: string, flat: Flat, bundle: Bundle): P
 			source !== undefined && (await Bun.file(source).exists())
 				? hunks(source, join(dir, path))
 				: undefined;
-		// Source lines the annotation says were written for an implementation the stack replaced.
+		// Source lines the annotation says were written for a component the stack does not use.
 		const meant = (annotation?.touches ?? [])
 			.filter(
-				(touch) =>
-					(touch.file ?? annotation?.files[0]) === from?.source &&
-					flat.components.get(touch.component)?.replaces.includes(touch.impl),
+				(touch) => (touch.file ?? annotation?.files[0]) === from?.source && unused(touch.component),
 			)
 			.flatMap((touch) => ranges(touch.lines));
 		/**
@@ -152,7 +151,7 @@ export async function checkAssembled(dir: string, flat: Flat, bundle: Bundle): P
 			for (const fingerprint of card.fingerprints) {
 				const pattern = new RegExp(`(?<![\\w-])${escapeRegExp(fingerprint)}(?![\\w-])`);
 				const hits = lines.flatMap((line, index) => (pattern.test(line) ? [index + 1] : []));
-				const what = `\`${fingerprint}\` belongs to ${card.component} \`${card.impl}\`, which the stack replaced`;
+				const what = `\`${fingerprint}\` belongs to ${card.type} \`${card.name}\`, which the stack does not use`;
 				const missed = hits.filter((line) => !kept(line));
 				const uncovered = hits.filter(kept);
 				if (missed.length > 0) add("leftover", `\`${path}\` line ${missed.join(", ")}: ${what}`);
@@ -219,6 +218,22 @@ export async function checkAssembled(dir: string, flat: Flat, bundle: Bundle): P
 			add(
 				"missing-outcome",
 				`\`${installed.get(id)}\` never says how to report its outcome (\`OUTCOME: <outcome>\`)`,
+			);
+		}
+	}
+	// A level the lead does not run is written into the block that does.
+	for (const [level, runner] of flat.inside) {
+		const used = new Set(
+			[...flat.nodes.values()].flatMap((node) =>
+				flat.levels[node.level] === level && node.block ? [node.block] : [],
+			),
+		);
+		const holder = used.size === 1 ? ([...used][0] ?? runner) : runner;
+		const body = text.get(installed.get(holder) ?? "");
+		if (body !== undefined && !body.includes(`## The ${level} loop`)) {
+			add(
+				"missing-loop",
+				`\`${installed.get(holder)}\` has no section \`## The ${level} loop\`; the level \`${level}\` runs inside \`${runner}\`, which never sees the lead's tables`,
 			);
 		}
 	}

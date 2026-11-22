@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 import { statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { analyze } from "./analyze.ts";
 import { checkAssembled } from "./assembled.ts";
-import { loadBundle } from "./bundle.ts";
+import { capabilitiesOf, loadBundle } from "./bundle.ts";
 import { loadStack } from "./load.ts";
 import type { Finding, Flat } from "./types.ts";
 
@@ -65,15 +65,16 @@ async function main(args: string[]): Promise<number> {
 			return 64;
 		}
 	}
-	const { flat, findings } = loadStack(await Bun.file(stackFile).text());
+	// A stack file given alone still reads the cards beside it: they hold the capabilities.
+	const bundle = await loadBundle(bundleDir ?? dirname(stackFile));
+	const { flat, findings } = loadStack(await Bun.file(stackFile).text(), capabilitiesOf(bundle));
 	if (!flat) return report(findings);
 	if (command === "expand") {
 		expand(flat);
 		return 0;
 	}
-	const bundle = bundleDir ? await loadBundle(bundleDir) : undefined;
-	findings.push(...(bundle?.findings ?? []), ...analyze(flat, bundle?.annotations));
-	if (command === "assembled" && bundle) {
+	findings.push(...bundle.findings, ...analyze(flat, bundleDir ? bundle.annotations : undefined));
+	if (command === "assembled") {
 		if (findings.some((finding) => finding.severity === "error")) {
 			console.log("the stack itself has errors; fix those first");
 			return report(findings);

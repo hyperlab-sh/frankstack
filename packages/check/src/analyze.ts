@@ -1,4 +1,4 @@
-import { ALL_DONE, NEXT_CHILD } from "./load.ts";
+import { ALL_DONE, cardRef, NEXT_CHILD } from "./load.ts";
 import type { Annotation, Edge, Finding, Flat } from "./types.ts";
 
 const norm = (outcome: string) => outcome.toLowerCase().replaceAll("_", "-");
@@ -293,7 +293,7 @@ export function analyze(flat: Flat, annotations?: Map<string, Annotation>): Find
 		break;
 	}
 
-	// Capabilities the steps need from the chosen implementations.
+	// Capabilities the steps need from the components the stack uses.
 	const emulated = new Map<string, string[]>();
 	const needs = (need: string, where: string) => {
 		const [componentId = "", capability = ""] = need.split(".");
@@ -307,12 +307,12 @@ export function analyze(flat: Flat, annotations?: Map<string, Annotation>): Find
 		else if (level === undefined)
 			add(
 				"missing-capability",
-				`${where} needs \`${need}\`, which \`${component.impl}\` does not declare`,
+				`${where} needs \`${need}\`, which \`${component.name}\` does not declare`,
 			);
 		else if (level === "missing")
 			add(
 				"missing-capability",
-				`${where} needs \`${need}\`, which \`${component.impl}\` cannot provide`,
+				`${where} needs \`${need}\`, which \`${component.name}\` cannot provide`,
 			);
 		else if (level === "emulated") emulated.set(need, [...(emulated.get(need) ?? []), where]);
 	};
@@ -350,18 +350,17 @@ export function analyze(flat: Flat, annotations?: Map<string, Annotation>): Find
 				continue;
 			}
 			for (const touch of annotation.touches) {
-				const component = flat.components.get(touch.component);
-				if (!component)
+				const ref = cardRef(touch.component);
+				if (!ref)
 					add(
 						"invalid",
-						`block \`${id}\` touches \`${touch.component}\`, which the stack does not choose`,
+						`block \`${id}\`: a touch names \`${touch.component}\`, which is not a card path (\`components/<Type>/<name>.md\`)`,
 					);
-				else if (touch.impl !== component.impl && !component.replaces.includes(touch.impl)) {
+				else if (!flat.components.has(ref.type))
 					add(
 						"invalid",
-						`block \`${id}\` was written for ${touch.component} \`${touch.impl}\`; the stack neither chooses it nor lists it under \`replaces\``,
+						`block \`${id}\` was written for ${ref.type} \`${ref.name}\`, and the stack uses no component of type \`${ref.type}\``,
 					);
-				}
 			}
 			for (const need of annotation.needs) needs(need, `block \`${id}\``);
 		}
@@ -405,10 +404,28 @@ export function analyze(flat: Flat, annotations?: Map<string, Annotation>): Find
 	for (const [need, where] of emulated) {
 		add(
 			"emulated-capability",
-			`\`${need}\` is emulated by \`${flat.components.get(need.split(".")[0] ?? "")?.impl}\` (needed by ${[...new Set(where)].join(", ")})`,
+			`\`${need}\` is emulated by \`${flat.components.get(need.split(".")[0] ?? "")?.name}\` (needed by ${[...new Set(where)].join(", ")})`,
 			undefined,
 			"warning",
 		);
+	}
+	// Where the artifacts are kept: once the stack gives paths, every artifact a step writes has one.
+	if (flat.paths.size > 0) {
+		const written = new Map<string, string>();
+		for (const node of live) {
+			for (const artifact of node.writes) {
+				if (!written.has(artifact)) written.set(artifact, node.id);
+			}
+		}
+		for (const [artifact, where] of written) {
+			if (!flat.paths.has(artifact) && !flat.paths.has(artifact.split("@")[0] ?? ""))
+				add(
+					"no-path",
+					`\`${artifact}\` is written by ${where}, and \`files\` gives it no path`,
+					undefined,
+					"warning",
+				);
+		}
 	}
 	return findings;
 }
