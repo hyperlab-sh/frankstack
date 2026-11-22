@@ -25,8 +25,10 @@ are the same in every bundle. Every path in a bundle is written from the bundle 
 - **Annotation**: what is known about one block: where its text assumes a component, how it can
   end, what it reads and writes. It is a map of the block, never installed.
 - **Component type**: a convention the blocks of one stack must share: where tasks live
-  (`TaskStorage`), where lessons are kept (`Memory`), how work is handed out (`Executor`), how
-  control passes on (`Handoff`), what the stack is installed into (`Harness`).
+  (`TaskStorage`), where lessons are kept (`Memory`), how requirements are identified
+  (`Requirement`), where decisions are recorded (`Decisions`), how work is handed out
+  (`Executor`), how control passes on (`Handoff`), what the stack is installed into (`Harness`).
+  The types of a stack are the keys under `components` in `stack.yaml`.
 - **Component**: one concrete convention of a type. `components/Memory/learnings-dir.md` (one
   markdown file per lesson in a folder) and `components/Memory/ce-solutions.md` (another stack's
   folder and format) are two components of the type `Memory`. A stack uses exactly one component
@@ -114,12 +116,14 @@ Rules:
 - **Outcomes.** A block reports an outcome and stops. It never names the next block; the lead
   routes. A cell that uses a block routes the names that block's annotation declares (case and
   `_`/`-` do not matter). For the step with `children`, the block's first-end name (`done`) is
-  covered by `children.done`.
+  covered by `children.done`. A cell may have both `children` and `outcomes`: `children` routes
+  how the level below ended, `outcomes` routes what the cell's own block reports besides.
 - **A cell has one block or none.** Without a block the lead does the step from `does`. Whatever
   `does` asks beyond the block's own text is the lead's job too; the block is not rewritten for it.
 - **`needs`** is for the checker: it compares each need with the capabilities the component's
   card declares. The assembler does not write it anywhere.
 
+`frankstack-check` is Frankstack's checker, a separate tool that is not in the bundle.
 `frankstack-check stack <bundle folder>` reports, each with a path that shows it: a read no step
 wrote on some path (including a first run with empty stores), an outcome a block declares that
 the stack does not route, a loop with no bound or bounds that reset each other, a step no path
@@ -137,8 +141,8 @@ with the levels written out.
 block: superpowers/implementer-prompt
 source: { repo: obra/superpowers, commit: <sha>, path: skills/subagent-driven-development/implementer-prompt.md }
 kind: prompt
-files:                                    # the block's original files; the first is the main file
-  - blocks/superpowers/implementer-prompt.md
+files:                                    # the block's original files; the first is the main file.
+  - blocks/superpowers/implementer-prompt.md   # under blocks/<origin>/ a file keeps the path it has in its origin
 parts:                                    # optional: named line ranges a cell can point at with #<part>
   before-you-begin: { lines: "22-30", outcomes: [clear, questions-raised] }
 outcomes: [done, blocked]                 # every way the block can end, when it has no parts
@@ -187,7 +191,8 @@ Rules for the annotator:
 - Text that names another skill, agent or command of the origin is a Handoff touch when it passes
   control, and goes under `refers` when it only mentions it.
 - A dependency that fits no component type goes under `other` with a sentence. Do not invent a
-  component for it.
+  component for it. An entry that only describes the dependency changes nothing; an entry that
+  says what to write is an order, like `change`.
 - The assembler may change a line only where a touch of a card the stack does not use, a touch
   with `change`, a `refers` entry or an `other` entry covers it. A line you leave out is a line it
   must keep.
