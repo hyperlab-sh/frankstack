@@ -87,7 +87,8 @@ pending:                  # blocks that are not imported yet: the name of each, 
    `pending` at a path the source has; every term is in the
    language; no fingerprint of one of the stack's providers is left outside a mark that ties the
    passage to it (`fs:uses` of that concept, `fs:concept` of the concept or of a name it owns,
-   `fs:ref` to the provider).
+   `fs:ref` to the provider). As a warning: the mark of an optional reference that covers only
+   its name.
 6. **Report.** `catalog/<stack>/IMPORT-REPORT.md`, for the operator to review:
    - **Added to the language**: each concept, verb or trait the import added, its definition, and
      the passages that led to it. The operator keeps it, renames it or takes it back.

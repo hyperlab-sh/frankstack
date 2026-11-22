@@ -62,15 +62,47 @@ describe("a sound block", () => {
 		const provides = tasks.header?.provides.get("TaskStorage");
 		expect([...(provides?.verbs.keys() ?? [])]).toEqual(["create", "mark-done"]);
 		expect(provides?.verbs.get("mark-done")).toBe("Close the ticket with `tk close <id>`.");
-		expect([...(provides?.names ?? [])]).toEqual([["Task", "ticket"]]);
+		expect([...(provides?.names ?? [])]).toEqual([["Task", { one: "ticket" }]]);
 		expect(provides?.fingerprints).toEqual(["tk ", ".tickets/"]);
 	});
 
-	test("an imported block has no id and belongs to no stack", () => {
+	test("an imported block needs no id, and then belongs to no stack", () => {
 		const review = read(BLOCKS.review ?? {});
 		expect(review.findings).toEqual([]);
 		expect(review.header?.id).toBeUndefined();
 		expect(stackOf(review)).toBeUndefined();
+	});
+
+	test("an imported block may say which block it is, with no source", () => {
+		const own = withHeader(`id: alpha/x\n${MINIMAL}`);
+		expect(own.findings).toEqual([]);
+		expect(own.header?.id).toBe("alpha/x");
+		expect(own.header?.source).toBeUndefined();
+		expect(stackOf(own)).toBe("alpha");
+	});
+
+	test("a provider's word for several is read when it is given", () => {
+		const header = (names: string) =>
+			`${MINIMAL}\nprovides:\n  Requirement: { verbs: { list: Read them. }, names: ${names} }`;
+		const given = withHeader(
+			header('{ Criterion: { one: criterion, many: criteria }, CriterionId: "AC-<n>" }'),
+		);
+		expect(given.findings).toEqual([]);
+		expect([...(given.header?.provides.get("Requirement")?.names ?? [])]).toEqual([
+			["Criterion", { one: "criterion", many: "criteria" }],
+			["CriterionId", { one: "AC-<n>" }],
+		]);
+		for (const wrong of [
+			"{ many: criteria }",
+			"{ one: criterion, many: 2 }",
+			"{ one: criterion, plural: criteria }",
+			"{ one: '' }",
+			"[criterion, criteria]",
+		]) {
+			expect(withHeader(header(`{ Criterion: ${wrong} }`)).findings.map((f) => f.message)).toEqual([
+				"block `x`: `provides.Requirement.names.Criterion` must be the provider's word for it, or `{ one: <word>, many: <word> }`",
+			]);
+		}
 	});
 
 	test("is read the same from a folder, files in sub-folders included", () => {
@@ -180,14 +212,12 @@ describe("the header", () => {
 		).toEqual(["block `x`: unknown header key `touches`"]);
 	});
 
-	test("`id` and `source` go together", () => {
-		const message = "block `x`: `id` and `source` go together: a block of a stack has both";
-		expect(withHeader(`id: alpha/x\n${MINIMAL}`).findings.map((f) => f.message)).toEqual([message]);
+	test("a `source` with no `id`", () => {
 		expect(
 			withHeader(`source: { repo: a/b, commit: "1", path: x }\n${MINIMAL}`).findings.map(
 				(f) => f.message,
 			),
-		).toEqual([message]);
+		).toEqual(["block `x`: `source` needs `id`: only a block of a stack says where its files are"]);
 	});
 
 	test("an `id` that is not `<stack>/<block>`", () => {
@@ -234,7 +264,7 @@ describe("the header", () => {
 			"block `x`: `uses.Decisions` must be a mapping",
 			"block `x`: `provides.TaskStorage.verbs` must map each verb to a sentence",
 			"block `x`: `provides.Routing.verbs.report` must be a sentence",
-			"block `x`: `provides.Routing.names.Task` must be the provider's word for it",
+			"block `x`: `provides.Routing.names.Task` must be the provider's word for it, or `{ one: <word>, many: <word> }`",
 			"block `x`: `inputs` must be a mapping",
 			"block `x`: `outcomes` must map each outcome to a sentence",
 		]);
@@ -409,6 +439,47 @@ describe("where the header and the marks disagree", () => {
 		files["review.md"] = swap(files["review.md"] ?? "", "</fs:path></fs:artifact>", "</fs:path>");
 		const finding = one(read(files).findings, "bad-mark");
 		expect(finding.message).toMatch(/^block `x`: review\.md:\d+: `<fs:artifact>` is not closed$/);
+	});
+});
+
+describe("the mark of a reference that is optional", () => {
+	const header = (required: boolean) =>
+		`${MINIMAL}\nreferences:\n  a/b: { kind: skill, required: ${required} }`;
+	const warned = (text: string, required = false) =>
+		withHeader(header(required), text).findings.map((f) => [f.rule, f.severity, f.message]);
+	const NARROW = 'Build it.\nThen use <fs:ref to="a/b"><fs:name>b</fs:name></fs:ref> to check.\n';
+
+	test("is a warning when it covers the name and nothing else", () => {
+		const line = 10;
+		expect(warned(NARROW)).toEqual([
+			[
+				"narrow-mark",
+				"warning",
+				`block \`x\`: SKILL.md:${line}: \`fs:ref\` to \`a/b\`, which is optional, covers only its name: when nothing stands for it the sentence around is left with a hole. Mark all the text that only makes sense when the block is there`,
+			],
+		]);
+	});
+
+	test("punctuation around the name is still the name alone", () => {
+		const text = 'The keys (read by <fs:ref to="a/b">`<fs:name>b</fs:name>`</fs:ref>) are few.\n';
+		expect(warned(text).map(([rule]) => rule)).toEqual(["narrow-mark"]);
+	});
+
+	test("is sound when it covers a whole aside in brackets", () => {
+		expect(
+			warned('Test the behavior<fs:ref to="a/b"> (<fs:name>b</fs:name>)</fs:ref>; not the text.\n'),
+		).toEqual([]);
+	});
+
+	test("is sound when it covers the words that go with the name", () => {
+		expect(
+			warned('Build it. <fs:ref to="a/b">Then use <fs:name>b</fs:name> to check.</fs:ref>\n'),
+		).toEqual([]);
+	});
+
+	test("is not judged without a name inside it, or for a required reference", () => {
+		expect(warned('Build it, then <fs:ref to="a/b">b</fs:ref>.\n')).toEqual([]);
+		expect(warned(NARROW, true)).toEqual([]);
 	});
 });
 

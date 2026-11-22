@@ -493,6 +493,50 @@ describe("what stands where a mark was", () => {
 		]);
 	});
 
+	test("a word for several of a concept is the provider's word for several", () => {
+		const plan = remade("plan", {
+			text: (text) =>
+				swap(
+					text,
+					'Keep every <fs:concept name="Task">task</fs:concept> small',
+					'Keep all <fs:concept name="Task">stories</fs:concept> small',
+				),
+		});
+		const named = (names: string) => ({
+			blocks: {
+				plan,
+				tasks: remade("tasks", {
+					header: (header) => swap(header, "names: { Task: ticket }", `names: ${names}`),
+				}),
+			},
+		});
+		const kept = { [PLAN]: swap(file(PLAN), "every ticket small", "all stories small") };
+		expect(check(kept, named("{ Task: { one: story, many: stories } }"))).toEqual([]);
+		expect(said(check(kept, named("{ Task: story }")), "unhandled-mark")).toEqual([
+			`\`${PLAN}\`: \`fs:concept\` at \`blocks/plan/SKILL.md\` line ${lineOf(plan["SKILL.md"] ?? "", "<fs:concept")}: the passage still says "stories": \`tasks\` calls a Task "story"`,
+		]);
+	});
+
+	test("a text written for an imported provider that says which block it is stays", () => {
+		const source = 'source: { repo: example/beta, commit: "2222222", path: skills/tasks }\n';
+		const from = {
+			yaml: swap(BUNDLE, "tasks: { from: beta/tasks }", "tasks: { origin: imported }"),
+			blocks: {
+				tasks: remade("tasks", { header: (header) => swap(header, source, "") }),
+				plan: remade("plan", {
+					header: (header) => swap(header, "written-for: alpha,", "written-for: beta/tasks,"),
+				}),
+			},
+		};
+		const asWritten = swap(
+			swap(file(PLAN), CREATE, CREATE_WAS),
+			"every ticket small",
+			"every task small",
+		);
+		expect(check({ [PLAN]: asWritten }, from)).toEqual([]);
+		expect(said(check({}, from), "changed-text")).not.toEqual([]);
+	});
+
 	test("a provider with no word for a concept leaves the ordinary one", () => {
 		const tasks = remade("tasks", {
 			header: (header) => swap(header, "    names: { Task: ticket }\n", ""),
@@ -803,6 +847,27 @@ provides:
 			]);
 		});
 
+		test("what the chosen provider or a place of the bundle also says betrays nobody", () => {
+			const shared = {
+				...from,
+				blocks: {
+					board: {
+						"SKILL.md": swap(
+							board["SKILL.md"] ?? "",
+							'fingerprints: ["bd "]',
+							'fingerprints: ["bd ", ".tickets/", "Tk ", "notes/plan.md"]',
+						),
+					},
+				},
+			};
+			const lead = `${file(LEAD)}\nTk add puts a ticket under \`.tickets/\`; the plan is at notes/plan.md.\n`;
+			expect(check({ ...over, [LEAD]: lead }, shared)).toEqual([]);
+			const both = `${lead}Run \`bd ready\` to see what is next.\n`;
+			expect(check({ ...over, [LEAD]: both }, shared)).toEqual([
+				left(LEAD, lineOf(both, "bd ready"), "bd ", "board"),
+			]);
+		});
+
 		test("a longer word is not its way", () => {
 			const lead = `${file(LEAD)}\nRun \`abd ready\` to see what is next.\n`;
 			expect(check({ ...over, [LEAD]: lead }, from)).toEqual([]);
@@ -831,6 +896,35 @@ provides:
 `,
 			{ "tasks.md": "# Tasks\n\nA task is a `- [ ]` line of the plan.\n" },
 		);
+
+		test("an imported block that says it is that block is looked at in the bundle", () => {
+			const STORE = "playbooks/store.md";
+			const text = "# Tasks\n\nA task is a `- [ ]` line of the plan.\n";
+			const own = {
+				"tasks.md": swap(
+					store["tasks.md"] ?? "",
+					'source: { repo: example/gamma, commit: "3333333", path: docs/tasks.md }\n',
+					"",
+				),
+			};
+			const from = {
+				yaml: swap(
+					BUNDLE,
+					"  review: { origin: imported }\n",
+					"  review: { origin: imported }\n  store: { origin: imported }\n",
+				),
+				blocks: { plan, store: own },
+			};
+			const over = {
+				[STORE]: text,
+				"assembly.json": listing({ [STORE]: { block: "store", file: "tasks.md" } }),
+			};
+			expect(check(over, from)).toEqual([]);
+			const lead = `${file(LEAD)}\nTick the \`- [ ]\` box when a task is done.\n`;
+			expect(check({ ...over, [LEAD]: lead }, from)).toEqual([
+				left(LEAD, lineOf(lead, "- [ ]"), "- [ ]", "store"),
+			]);
+		});
 
 		test("without the catalog it cannot be looked for", () => {
 			expect(check({}, { blocks: { plan } })).toEqual([

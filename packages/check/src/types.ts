@@ -88,12 +88,15 @@ export type Use = {
 	needs: string[];
 };
 
+/** A provider's word for a concept: for one of them, and for several when no rule gives it. */
+export type Name = { one: string; many?: string };
+
 /** What a block gives for one concept it provides. */
 export type Provide = {
 	/** Verb to its sentence. A created block has no sentence yet: the assembler writes it. */
 	verbs: Map<string, string | undefined>;
 	/** Named concept to what this provider calls it. */
-	names: Map<string, string>;
+	names: Map<string, Name>;
 	traits: string[];
 	fingerprints: string[];
 };
@@ -115,6 +118,7 @@ export type Definition = {
 export type Source = { repo: string; commit: string; path: string };
 
 export type Header = Definition & {
+	/** `<stack>/<block>`: what texts written for this block name under `written-for`. */
 	id?: string;
 	source?: Source;
 	/** File name to the SHA-256 of its original. */
