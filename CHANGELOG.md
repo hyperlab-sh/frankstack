@@ -19,3 +19,6 @@ released yet, so there are no version numbers.
 - A stack can be imported in part: `pending` in `stack.yaml` lists the blocks that imported texts
   point at and that are not imported yet. Biome and git's line-ending conversion leave `catalog/`
   alone.
+- The first blocks in `catalog/`: four of `superpowers` and one each of `compound-engineering`,
+  `lavra` and `pstack`, each stack with its licence and its import report.
+- `Executor.resume` in the language: an agent that was given work can be sent another message.

@@ -60,7 +60,7 @@ and any of them can be named in a `fs:concept` mark.
 | `Memory` | Where lessons from earlier runs are kept. | `search`, `read`, `write`, `update`, `delete` | |
 | `Decisions` | Where decisions are recorded. | `read`, `write`, `cite` | `numbered` |
 | `Requirement` | How each requirement is identified, so that work and checks can point at it. | `list`, `cite`, `verdict` | `stable-ids` |
-| `Executor` | How work is given to another agent and how its result comes back. | `dispatch`, `result` | `fresh-context`, `parallel`, `cross-model-review` |
+| `Executor` | How work is given to another agent and how its result comes back. | `dispatch`, `result` | `fresh-context`, `parallel`, `cross-model-review`, `resume` |
 | `Routing` | How a block says it has finished, and what then decides which block runs next. | `report` | |
 
 For each of these that its blocks use, a bundle names the provider, and every block that uses the
@@ -101,6 +101,8 @@ Traits:
 - `Executor.fresh-context`: the other agent starts without this conversation.
 - `Executor.parallel`: several can run at once.
 - `Executor.cross-model-review`: a review can run on another model than the work.
+- `Executor.resume`: an agent that was given work can be sent another message later, and still has
+  what it read and did.
 - `Harness.skills`, `.subagents`, `.hooks`: the target loads skills, runs subagents, runs hooks.
 
 ### Concepts a provider names
@@ -142,7 +144,9 @@ What one step leaves for another.
 ## Where these lists come from, and how they change
 
 The lists are a first version, taken from the twelve blocks and the one flow of the first test
-bundle. They have not been tried against a whole stack.
+bundle. They have not been tried against a whole stack. The first import (seven blocks of four
+stacks) added one term, `Executor.resume`, and proposed eight more that are not added: each is in
+the `IMPORT-REPORT.md` of its stack, under "Left unmapped".
 
 Not settled: four artifact kinds name what a provided concept keeps (`plan` and `TaskStorage`,
 `requirements` and `Requirement`, `lessons` and `Memory`, `decisions` and `Decisions`), and

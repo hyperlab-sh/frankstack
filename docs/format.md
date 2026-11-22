@@ -229,7 +229,8 @@ Header keys:
 - `source` says where the block's files are in the stack's repository. `commit` is written in
   quotes: without them a commit of digits only is read as a number. `path` is the block's folder,
   or the file itself for a block of one file.
-- A block with `fs:route` marks relies on `Routing` and does not list it under `uses`.
+- A block with `fs:route` marks relies on `Routing` and does not list it under `uses` for them.
+  It lists `Routing` there when a `fs:uses` mark names it, as for any concept.
 - `uses.<Concept>.written-for` says what the text was written for: the id of the block that
   provides the concept in its stack (`lavra/beads`), or the stack's name when the stack has no
   such block and its way of doing it is only in the text of its blocks (`superpowers`). `verbs` lists the verbs
@@ -247,7 +248,7 @@ Header keys:
       names:                                # what this provider calls each concept it names
         Task: bead
         TaskId: "BD-<n>"
-        Criterion: "an entry of the bead's `## Validation` section"
+        TaskDefinition: "the bead's `## What` section"
       traits: []
       fingerprints: ["bd ", ".beads/"]      # strings that betray this provider in a text
   ```
@@ -285,6 +286,10 @@ How marks are written:
 - Taking out every tag, and the header with the line break after it, gives the original file byte
   for byte. The SHA-256 under `files` is of that original.
 - A file that already contains `<fs:` or `</fs:` cannot be marked.
+- Marks go into frontmatter as into any other text: a `description` that says "bead" has the
+  same `fs:concept` mark as the body.
+- `fs:artifact` has a `fs:path` only where the text gives a literal place. A commit, a reply, or
+  a document whose place the caller gives has none.
 
 How marks are placed:
 
