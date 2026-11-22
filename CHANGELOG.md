@@ -16,3 +16,6 @@ released yet, so there are no version numbers.
   with the steps of an import (`docs/catalog.md`).
 - `frankstack-check` in `packages/check`: checks a bundle (`bundle`, `expand`), the assembly an
   agent wrote from it (`assembled`), and a stack of the catalog against its source (`catalog`).
+- A stack can be imported in part: `pending` in `stack.yaml` lists the blocks that imported texts
+  point at and that are not imported yet. Biome and git's line-ending conversion leave `catalog/`
+  alone.

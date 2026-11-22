@@ -6,6 +6,11 @@ import { NAMED } from "./language.ts";
 import type { Block, FileMark, Finding, Severity } from "./types.ts";
 
 const STACK_KEYS = ["repository", "commit", "licence", "imported"];
+/** Blocks of the stack that are not imported yet: the name of each and its path in the repository. */
+const PENDING = "pending";
+
+/** A path in the repository as git names it: no `./` in front, no `/` at the end. */
+const inRepository = (path: string) => path.replace(/^\.\//, "").replace(/\/+$/, "");
 
 /** Runs git in the clone; undefined when it fails. The output is one character per byte. */
 function git(clone: string, ...args: string[]): string | undefined {
@@ -36,12 +41,14 @@ export function checkCatalog(dir: string, clone: string): Finding[] {
 
 	// The stack's own files.
 	let pinned: { repository: string; commit: string } | undefined;
+	const pending = new Map<string, string | undefined>();
 	try {
 		const doc: unknown = Bun.YAML.parse(readFileSync(join(dir, "stack.yaml"), "utf8"));
 		if (!isObj(doc)) add("invalid", "`stack.yaml` must be a mapping");
 		else {
 			for (const key of Object.keys(doc)) {
-				if (!STACK_KEYS.includes(key)) add("invalid", `\`stack.yaml\`: unknown key \`${key}\``);
+				if (!STACK_KEYS.includes(key) && key !== PENDING)
+					add("invalid", `\`stack.yaml\`: unknown key \`${key}\``);
 			}
 			for (const key of STACK_KEYS) {
 				const value = doc[key];
@@ -54,6 +61,22 @@ export function checkCatalog(dir: string, clone: string): Finding[] {
 			}
 			if (typeof doc.repository === "string" && typeof doc.commit === "string")
 				pinned = { repository: doc.repository, commit: doc.commit };
+			const listed = doc[PENDING];
+			if (isObj(listed)) {
+				for (const [name, path] of Object.entries(listed)) {
+					const given = typeof path === "string" && path !== "";
+					pending.set(name, given ? path : undefined);
+					if (!given)
+						add(
+							"invalid",
+							`\`stack.yaml\`: \`${PENDING}.${name}\` must be the block's path in the repository`,
+						);
+				}
+			} else if (listed !== undefined)
+				add(
+					"invalid",
+					`\`stack.yaml\`: \`${PENDING}\` must map each block that is not imported yet to its path in the repository`,
+				);
 		}
 	} catch (error) {
 		add(
@@ -92,6 +115,22 @@ export function checkCatalog(dir: string, clone: string): Finding[] {
 		add("invalid", `\`${dir}\` cannot be read`);
 	}
 	if (folders.length === 0) add("invalid", "the stack has no block");
+	for (const [name, path] of pending) {
+		if (folders.includes(name))
+			add(
+				"invalid",
+				`\`stack.yaml\`: \`${PENDING}\` lists \`${name}\`, which is imported: take it out of the list`,
+			);
+		else if (
+			path !== undefined &&
+			at !== undefined &&
+			git(clone, "cat-file", "-e", `${at}:${inRepository(path)}`) === undefined
+		)
+			add(
+				"unknown-block",
+				`\`stack.yaml\`: \`${PENDING}.${name}\` is \`${path}\`, and the source has no such path at \`${pinned?.commit}\``,
+			);
+	}
 	const blocks = new Map<string, Block>();
 	for (const folder of folders) {
 		const id = `${stack}/${folder}`;
@@ -125,7 +164,7 @@ export function checkCatalog(dir: string, clone: string): Finding[] {
 			continue;
 		}
 		// `source.path` is the block's folder in the repository, or the file itself for a block of one file.
-		const path = head.source.path.replace(/^\.\//, "").replace(/\/+$/, "");
+		const path = inRepository(head.source.path);
 		const root = path === "" || path === ".";
 		for (const [file, original] of block.originals) {
 			const places = [root ? file : `${path}/${file}`];
@@ -146,7 +185,7 @@ export function checkCatalog(dir: string, clone: string): Finding[] {
 		}
 	}
 
-	// Every block a text points at is a block of this stack.
+	// Every block a text points at is a block of this stack: one that is here, or one still to import.
 	for (const [id, block] of blocks) {
 		const to = new Map<string, string>();
 		for (const reference of block.header?.references.keys() ?? [])
@@ -156,7 +195,8 @@ export function checkCatalog(dir: string, clone: string): Finding[] {
 				to.set(mark.attrs.to, `\`fs:route\` at ${mark.file}:${mark.line}`);
 		}
 		for (const [target, where] of to) {
-			if (!blocks.has(target))
+			const name = target.startsWith(`${stack}/`) ? target.slice(stack.length + 1) : undefined;
+			if (!blocks.has(target) && !(name !== undefined && pending.has(name)))
 				add(
 					"unknown-block",
 					`block \`${id}\`: ${where} names \`${target}\`, which is not a block of \`${stack}\``,
