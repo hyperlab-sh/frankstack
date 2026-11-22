@@ -1,292 +1,635 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Bundle, frontmatter, walk } from "./bundle.ts";
-import { cardRef } from "./load.ts";
-import type { Finding, Flat } from "./types.ts";
+import { fingerprint, isObj, loadBlock, norm, walk } from "./block.ts";
+import { isDir, keeps, usesOf } from "./bundle.ts";
+import { base } from "./flow.ts";
+import { NAMED } from "./language.ts";
+import { utf8 } from "./marks.ts";
+import type { Bundle, BundleBlock, FileMark, Finding, Flat, Node, Severity } from "./types.ts";
 
-const TEXT = /\.(md|ya?ml|json|sh|txt)$|^[^.]*$/;
-const OWN = new Set(["assembly.json", "ASSEMBLY-REPORT.md"]);
-const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const FRONT = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/;
+/** What the assembler writes that comes from no block. */
+const OWN = [
+	"assembly.json",
+	"ASSEMBLY-REPORT.md",
+	".claude-plugin/plugin.json",
+	"hooks/hooks.json",
+];
+const MANIFEST = ".claude-plugin/plugin.json";
+/** How many changed passages of one file are listed one by one. */
+const LISTED = 5;
 
-type Hunk = { from: number; removed: number; to: number; added: number };
+const squash = (text: string) => text.replace(/\s+/g, " ").trim();
+/** A concept's name as ordinary words: `TaskId` is "task id". */
+const ordinary = (concept: string) => concept.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+const lineAt = (text: string, offset: number) => text.slice(0, offset).split("\n").length;
 
-/** The hunks of `diff -U0 source output`. */
-function hunks(source: string, output: string): Hunk[] {
-	const run = Bun.spawnSync(["diff", "-U0", source, output]);
-	// 0 is no difference and 1 is differences; anything else means `diff` did not compare the files.
-	if (run.exitCode > 1)
-		throw new Error(`diff ${source} ${output} failed: ${run.stderr.toString().trim()}`);
-	const count = (text: string | undefined) => (text === undefined ? 1 : Number(text));
-	return [...run.stdout.toString().matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)].map(
-		(match) => ({
-			from: Number(match[1]),
-			removed: count(match[2]),
-			to: Number(match[3]),
-			added: count(match[4]),
-		}),
-	);
-}
-
-/** The source line an output line is an unchanged copy of; undefined when it was added or changed. */
-function origin(diff: Hunk[], line: number): number | undefined {
-	let shift = 0;
-	for (const hunk of diff) {
-		if (hunk.added > 0 && line >= hunk.to && line < hunk.to + hunk.added) return undefined;
-		// With nothing added, `to` is the output line the removed text followed.
-		const before = hunk.added > 0 ? hunk.to + hunk.added - 1 < line : hunk.to < line;
-		if (before) shift += hunk.added - hunk.removed;
+/** Top-level keys written twice in a frontmatter: YAML keeps one and says nothing. */
+export function duplicateKeys(text: string): string[] {
+	const seen = new Set<string>();
+	const twice = new Set<string>();
+	for (const line of (FRONT.exec(text)?.[1] ?? "").split(/\r?\n/)) {
+		const key = /^([A-Za-z_][\w-]*):/.exec(line)?.[1];
+		if (key === undefined) continue;
+		if (seen.has(key)) twice.add(key);
+		seen.add(key);
 	}
-	return line - shift;
+	return [...twice];
 }
 
-/** `"3, 7-9"` as inclusive ranges. */
-const ranges = (lines: string): [number, number][] =>
-	lines
-		.split(",")
-		.map((range) => range.trim().split("-").map(Number))
-		.map(([first = 0, last = first]) => [first, last]);
+/** What the assembly must have where a mark was. */
+type Expect =
+	/** The assembler's own text: nothing to compare it with. */
+	| { kind: "any" }
+	| { kind: "gone"; why: string }
+	| { kind: "sentence"; sentence: string; name?: string; outcome?: string; what: string }
+	| { kind: "contains"; text: string; what: string }
+	| { kind: "renamed"; expected: string; what: string };
 
-/** Checks a plugin folder an assembler wrote from `bundle` for the stack `flat`. */
-export async function checkAssembled(dir: string, flat: Flat, bundle: Bundle): Promise<Finding[]> {
+type Hole = { mark: FileMark; was: string; expect: Expect };
+type Item = { phrase: string; line: number } | { hole: Hole };
+type Cell = { flat: Flat; node: Node };
+
+/** What the table of `docs/format.md` says about one mark; undefined when its text stays. */
+function expectation(
+	mark: FileMark,
+	block: BundleBlock,
+	bundle: Bundle,
+	cells: Cell[],
+): Expect | undefined {
+	const { to = "", concept = "", verb, name = "", outcome = "" } = mark.attrs;
+	const above = (tag: string) => {
+		for (let at = mark.parent; at; at = at.parent) if (at.tag === tag) return at;
+		return undefined;
+	};
+	const provider = (of: string) => {
+		const choice = bundle.concepts.get(of);
+		return choice && "block" in choice ? bundle.blocks.get(choice.block) : undefined;
+	};
+	const given = (slot: string) =>
+		cells.flatMap(({ flat, node }) => {
+			const artifact = node.inputs.get(slot) ?? node.outputs.get(slot);
+			return artifact === undefined ? [] : [{ flat, artifact }];
+		});
+	switch (mark.tag) {
+		case "ref":
+			return block.references.get(to) === null
+				? { kind: "gone", why: `the reference \`${to}\` is bound to null` }
+				: undefined;
+		case "name": {
+			const reference = above("ref")?.attrs.to ?? "";
+			const bound = block.references.get(reference);
+			return typeof bound === "string"
+				? {
+						kind: "contains",
+						text: bound,
+						what: `the name of \`${bound}\`, which stands for \`${reference}\``,
+					}
+				: undefined;
+		}
+		case "uses": {
+			if (keeps(bundle, concept, usesOf(block).get(concept)?.writtenFor)) return undefined;
+			const other = provider(concept);
+			const sentence = verb ? other?.def?.provides.get(concept)?.verbs.get(verb) : undefined;
+			if (!other || sentence === undefined) return { kind: "any" };
+			return {
+				kind: "sentence",
+				sentence,
+				name: other.name,
+				what: `the sentence of \`${other.name}\` for \`${concept}.${verb}\``,
+			};
+		}
+		case "concept": {
+			const owner = NAMED.get(name);
+			if (!owner || block.def?.provides.has(owner)) return undefined;
+			if (keeps(bundle, owner, block.def?.uses.get(owner)?.writtenFor)) return undefined;
+			const other = provider(owner);
+			const called = other?.def?.provides.get(owner)?.names.get(name);
+			return {
+				kind: "renamed",
+				expected: called ?? ordinary(name),
+				what: called
+					? `\`${other?.name}\` calls a ${name} "${called}"`
+					: `\`${other?.name}\` gives no name for ${name}, so the ordinary word goes there`,
+			};
+		}
+		case "route": {
+			const other = provider("Routing");
+			if (!other) return undefined;
+			const sentence = other.def?.provides.get("Routing")?.verbs.get("report");
+			if (sentence === undefined) return { kind: "any" };
+			return {
+				kind: "sentence",
+				sentence,
+				name: other.name,
+				outcome,
+				what: `the sentence of \`${other.name}\` for reporting \`${outcome}\``,
+			};
+		}
+		case "artifact": {
+			// A block no cell uses is given no artifact by anyone: its text stays.
+			if (cells.length === 0 || given(name).length > 0) return undefined;
+			// A required input no cell gives is an error of the bundle, reported there.
+			return block.def?.inputs.get(name)?.required
+				? undefined
+				: { kind: "gone", why: `no cell gives an artifact for \`${name}\`` };
+		}
+		case "path": {
+			const slot = above("artifact")?.attrs.name ?? "";
+			const places = given(slot).map(
+				({ flat, artifact }) => flat.paths.get(artifact) ?? flat.paths.get(base(artifact)),
+			);
+			if (places.length === 0) return undefined;
+			if (places.includes(undefined)) return { kind: "any" };
+			const distinct = [...new Set(places as string[])];
+			if (distinct.length > 1)
+				return {
+					kind: "contains",
+					text: "the place the lead gives for",
+					what: `"the place the lead gives for \`${slot}\`": the cells keep it in different places`,
+				};
+			const place = (distinct[0] ?? "").replace(/^\((.*)\)$/, "$1");
+			return { kind: "contains", text: place, what: `the place of \`${slot}\`` };
+		}
+		default:
+			return undefined;
+	}
+}
+
+/** The source file as what must be found in the assembly, in order: phrases and what stands at each mark. */
+function items(
+	original: string,
+	marks: FileMark[],
+	expect: (mark: FileMark) => Expect | undefined,
+) {
+	const result: Item[] = [];
+	const literal = (from: number, to: number) => {
+		let at = from;
+		for (const paragraph of original.slice(from, to).split(/(\r?\n[ \t]*\r?\n)/)) {
+			const phrase = squash(utf8(paragraph));
+			if (/[\p{L}\p{N}]/u.test(phrase)) {
+				const lead = paragraph.length - paragraph.trimStart().length;
+				result.push({ phrase, line: lineAt(original, at + lead) });
+			}
+			at += paragraph.length;
+		}
+	};
+	// The frontmatter is the target's to write (the name the block is installed under): not compared.
+	let pos = FRONT.exec(original)?.[0].length ?? 0;
+	const holes = new Set<FileMark>();
+	const inside = (mark: FileMark) => {
+		for (let at = mark.parent; at; at = at.parent) if (holes.has(at as FileMark)) return true;
+		return false;
+	};
+	for (const mark of marks) {
+		if (mark.start < pos || inside(mark)) continue;
+		const expected = expect(mark);
+		if (!expected) continue;
+		holes.add(mark);
+		literal(pos, mark.start);
+		result.push({
+			hole: { mark, was: squash(utf8(original.slice(mark.start, mark.end))), expect: expected },
+		});
+		pos = mark.end;
+	}
+	literal(pos, original.length);
+	return result;
+}
+
+/** Why what stands in the assembly where a mark was is not what the table says, if it is not. */
+function wrong(hole: Hole, window: string): string | undefined {
+	const { expect, was } = hole;
+	switch (expect.kind) {
+		case "any":
+			return undefined;
+		case "gone":
+			// A short passage is only evidence when it is all there is between its neighbours.
+			return was !== "" && (was.length >= 12 ? window.includes(was) : window === was)
+				? `the passage should have been taken out: ${expect.why}`
+				: undefined;
+		case "sentence": {
+			let at = 0;
+			for (const part of expect.sentence.split(/\{name\}|\{outcome\}/).map(squash)) {
+				const found = part === "" ? at : window.indexOf(part, at);
+				if (found < 0) return `the passage should be ${expect.what}: "${expect.sentence}"`;
+				at = found + part.length;
+			}
+			if (expect.sentence.includes("{name}") && expect.name && !window.includes(expect.name))
+				return `the passage should be ${expect.what}, with the name \`${expect.name}\``;
+			if (expect.outcome && !norm(window).includes(norm(expect.outcome)))
+				return `the passage should be ${expect.what}, and never names the outcome`;
+			// The provider's sentence beside the passage it replaces is two instructions for one thing.
+			if (was.length >= 12 && window.includes(was) && !squash(expect.sentence).includes(was))
+				return `the passage was kept beside ${expect.what}`;
+			return undefined;
+		}
+		case "contains":
+			return window.includes(squash(expect.text))
+				? undefined
+				: `the passage should have ${expect.what}`;
+		case "renamed":
+			return window === was && !was.toLowerCase().includes(expect.expected.toLowerCase())
+				? `the passage still says "${was}": ${expect.what}`
+				: undefined;
+	}
+}
+
+/** Compares one file of the assembly with the block file it was written from. */
+function compare(
+	path: string,
+	assembled: string,
+	block: BundleBlock,
+	file: string,
+	bundle: Bundle,
+	cells: Cell[],
+): Finding[] {
 	const findings: Finding[] = [];
-	const add = (rule: string, message: string, severity: "error" | "warning" = "error") => {
+	const loaded = block.loaded;
+	const original = loaded?.originals.get(file);
+	if (!loaded || original === undefined) return findings;
+	const shift = file === loaded.main ? loaded.headerLines : 0;
+	const from = (line: number) => `\`blocks/${block.name}/${file}\` line ${line + shift}`;
+	const marks = loaded.marks.filter((mark) => mark.file === file);
+	const list = items(original, marks, (mark) => expectation(mark, block, bundle, cells));
+	const text = squash(assembled.replace(FRONT, ""));
+
+	// Each phrase at the earliest place it can be, then at the latest: what lies between the two is
+	// the most a mark between them can have become.
+	const earliest: ({ start: number; end: number } | undefined)[] = [];
+	let pos = 0;
+	const missing: { phrase: string; line: number }[] = [];
+	for (const item of list) {
+		if ("hole" in item) {
+			earliest.push(undefined);
+			continue;
+		}
+		const start = text.indexOf(item.phrase, pos);
+		if (start < 0) {
+			missing.push(item);
+			earliest.push(undefined);
+			continue;
+		}
+		pos = start + item.phrase.length;
+		earliest.push({ start, end: pos });
+	}
+	const latest: (number | undefined)[] = list.map(() => undefined);
+	pos = text.length;
+	for (let index = list.length - 1; index >= 0; index--) {
+		const item = list[index];
+		if (!item || "hole" in item || !earliest[index]) continue;
+		const start = text.lastIndexOf(item.phrase, pos - item.phrase.length);
+		latest[index] = start;
+		pos = start;
+	}
+	for (const { phrase, line } of missing.slice(0, LISTED)) {
+		const shown = phrase.length > 90 ? `${phrase.slice(0, 90)}…` : phrase;
+		findings.push({
+			rule: "changed-text",
+			severity: "error",
+			message: `\`${path}\`: text of ${from(line)} that no mark covers was changed, moved or removed: "${shown}"`,
+		});
+	}
+	if (missing.length > LISTED)
+		findings.push({
+			rule: "changed-text",
+			severity: "error",
+			message: `\`${path}\`: ${missing.length - LISTED} more passages of \`blocks/${block.name}/${file}\` were changed, moved or removed`,
+		});
+	list.forEach((item, index) => {
+		if (!("hole" in item)) return;
+		let lo = 0;
+		for (let before = index - 1; before >= 0; before--) {
+			const end = earliest[before]?.end;
+			if (end !== undefined) {
+				lo = end;
+				break;
+			}
+		}
+		let hi = text.length;
+		for (let after = index + 1; after < list.length; after++) {
+			const start = latest[after];
+			if (start !== undefined) {
+				hi = start;
+				break;
+			}
+		}
+		const problem = wrong(item.hole, hi > lo ? text.slice(lo, hi).trim() : "");
+		if (problem)
+			findings.push({
+				rule: "unhandled-mark",
+				severity: "error",
+				message: `\`${path}\`: \`fs:${item.hole.mark.tag}\` at \`blocks/${block.name}/${file}\` line ${item.hole.mark.line}: ${problem}`,
+			});
+	});
+	return findings;
+}
+
+type Entry = { path: string; block: string; file?: string; origin?: "created" | "lead" };
+
+/** Reads `assembly.json`: for each file written, the block and the file it came from, `created`, or `lead`. */
+function entries(raw: string | undefined, add: (rule: string, message: string) => void): Entry[] {
+	let doc: unknown;
+	try {
+		doc = JSON.parse(raw ?? "");
+	} catch {
+		add("missing-file", "`assembly.json` is missing or not valid JSON");
+		return [];
+	}
+	if (!isObj(doc) || !isObj(doc.files)) {
+		add("invalid", "`assembly.json` needs `files`: each file written, with its block");
+		return [];
+	}
+	const result: Entry[] = [];
+	for (const [path, value] of Object.entries(doc.files)) {
+		const origin = isObj(value) ? value.origin : undefined;
+		if (
+			!isObj(value) ||
+			typeof value.block !== "string" ||
+			(typeof value.file === "string") === (origin !== undefined) ||
+			(origin !== undefined && origin !== "created" && origin !== "lead")
+		) {
+			add(
+				"invalid",
+				`\`assembly.json\`: \`${path}\` needs \`block\`, and either \`file\` (the file of the block it came from) or \`origin\` (\`created\` or \`lead\`)`,
+			);
+			continue;
+		}
+		result.push({
+			path,
+			block: value.block,
+			file: typeof value.file === "string" ? value.file : undefined,
+			origin: origin === "created" || origin === "lead" ? origin : undefined,
+		});
+	}
+	return result;
+}
+
+/**
+ * Checks an assembly against the bundle it was written from. `catalog` is the folder of the
+ * catalog: with it the check also looks for what is left of the providers the bundle replaced.
+ */
+export function checkAssembled(
+	dir: string,
+	bundle: Bundle,
+	bundleDir: string,
+	catalog?: string,
+): Finding[] {
+	const findings: Finding[] = [];
+	const add = (rule: string, message: string, severity: Severity = "error") => {
 		findings.push({ rule, severity, message });
 	};
 	const files = walk(dir);
-	const text = new Map<string, string>();
-	for (const path of files) {
-		if (TEXT.test(path.split("/").pop() ?? ""))
-			text.set(path, await Bun.file(join(dir, path)).text());
+	const text = new Map(files.map((file) => [file, readFileSync(join(dir, file), "utf8")]));
+	const own = (path: string) => OWN.includes(path) || path.startsWith("LICENSES/");
+
+	// A tag left behind.
+	for (const [path, body] of text) {
+		if (path === "assembly.json" || path === "ASSEMBLY-REPORT.md" || path.startsWith("LICENSES/"))
+			continue;
+		const lines = body
+			.split("\n")
+			.flatMap((line, index) => (/<\/?fs:/.test(line) ? [index + 1] : []));
+		if (lines.length > 0)
+			add(
+				"leftover-tag",
+				`\`${path}\` line ${lines.join(", ")}: a \`fs:\` tag was left in the text`,
+			);
 	}
 
-	// The plugin and the installed blocks.
-	let plugin = "";
-	try {
-		plugin = String(JSON.parse(text.get(".claude-plugin/plugin.json") ?? "").name ?? "");
-	} catch {}
-	if (!plugin) add("missing-file", "`.claude-plugin/plugin.json` is missing or has no `name`");
-	const router = [...flat.blocks.values()].find((block) => block.role === "router");
-	const installed = new Map<string, string>();
-	for (const [id, block] of flat.blocks) {
-		const path =
-			block.kind === "agent"
-				? `agents/${block.as}.md`
-				: block.kind === "prompt"
-					? `skills/${router?.as}/prompts/${block.as}.md`
-					: `skills/${block.as}/SKILL.md`;
-		installed.set(id, path);
-		if (!text.has(path)) add("missing-block", `block \`${id}\` should be installed at \`${path}\``);
+	// What the assembler writes besides the blocks.
+	if (!text.has("ASSEMBLY-REPORT.md")) add("missing-file", "`ASSEMBLY-REPORT.md` is missing");
+	for (const licence of walk(join(bundleDir, "licenses"))) {
+		if (!text.has(`LICENSES/${licence}`))
+			add("missing-file", `\`LICENSES/${licence}\` is missing: the licences go with the blocks`);
+	}
+
+	// Which file came from which block.
+	const listed = entries(text.get("assembly.json"), add);
+	const cells = new Map<string, Cell[]>();
+	const leads = new Set(bundle.flows.map((flat) => flat.lead));
+	for (const flat of bundle.flows) {
+		for (const node of flat.nodes.values()) {
+			if (node.block) cells.set(node.block, [...(cells.get(node.block) ?? []), { flat, node }]);
+		}
+	}
+	const written = new Map<string, Entry[]>();
+	for (const entry of listed) {
+		const block = bundle.blocks.get(entry.block);
+		if (!text.has(entry.path)) {
+			add(
+				"missing-file",
+				`\`assembly.json\` lists \`${entry.path}\`, which is not in the assembly`,
+			);
+			continue;
+		}
+		if (!block) {
+			add(
+				"unknown-block",
+				`\`assembly.json\`: \`${entry.path}\` names block \`${entry.block}\`, which the bundle does not have`,
+			);
+			continue;
+		}
+		const wants = block.origin !== "created" ? "file" : leads.has(block.name) ? "lead" : "created";
+		if ((entry.origin ?? "file") !== wants) {
+			add(
+				"invalid",
+				`\`assembly.json\`: \`${entry.path}\` is given as ${entry.origin ? `\`origin: ${entry.origin}\`` : "written from a file"}, and block \`${block.name}\` is ${wants === "file" ? "a block with files: name the file it came from" : `\`${wants}\``}`,
+			);
+			continue;
+		}
+		if (entry.file !== undefined && !block.loaded?.originals.has(entry.file)) {
+			add(
+				"invalid",
+				`\`assembly.json\`: \`${entry.path}\` came from \`${entry.file}\`, which is not a file of block \`${block.name}\``,
+			);
+			continue;
+		}
+		written.set(block.name, [...(written.get(block.name) ?? []), entry]);
+		if (entry.file !== undefined)
+			findings.push(
+				...compare(
+					entry.path,
+					text.get(entry.path) ?? "",
+					block,
+					entry.file,
+					bundle,
+					cells.get(block.name) ?? [],
+				),
+			);
+	}
+	for (const block of bundle.blocks.values()) {
+		const from = written.get(block.name) ?? [];
+		if (block.origin === "created") {
+			if (from.length === 0)
+				add(
+					"not-written",
+					leads.has(block.name)
+						? `the lead \`${block.name}\` was not written`
+						: `the created block \`${block.name}\` was not written`,
+				);
+			continue;
+		}
+		for (const file of block.loaded?.originals.keys() ?? []) {
+			if (!from.some((entry) => entry.file === file))
+				add("not-written", `\`${file}\` of block \`${block.name}\` was not written`);
+		}
+	}
+	const known = new Set(listed.map((entry) => entry.path));
+	for (const path of files) {
+		if (!own(path) && !known.has(path))
+			add("unlisted-file", `\`${path}\` is not listed in \`assembly.json\``, "warning");
 	}
 
 	// Frontmatter of skills and agents.
+	const main = new Map<string, string>();
+	for (const entry of listed) {
+		const block = bundle.blocks.get(entry.block);
+		if (entry.file !== undefined && entry.file === block?.loaded?.main)
+			main.set(entry.path, entry.block);
+	}
 	const names = new Map<string, string>();
 	for (const [path, body] of text) {
 		const skill = /^skills\/([^/]+)\/SKILL\.md$/.exec(path)?.[1];
 		const agent = /^agents\/([^/]+)\.md$/.exec(path)?.[1];
 		if (!skill && !agent) continue;
-		const data = frontmatter(body);
-		if (!data || typeof data.name !== "string" || typeof data.description !== "string") {
+		const front = FRONT.exec(body)?.[1];
+		let data: unknown;
+		try {
+			data = front === undefined ? undefined : Bun.YAML.parse(front);
+		} catch {
+			data = undefined;
+		}
+		if (
+			!isObj(data) ||
+			typeof data.name !== "string" ||
+			typeof data.description !== "string" ||
+			data.description.trim() === ""
+		) {
 			add("bad-frontmatter", `\`${path}\` needs frontmatter with \`name\` and \`description\``);
 			continue;
 		}
+		for (const key of duplicateKeys(body))
+			add("bad-frontmatter", `\`${path}\` gives \`${key}\` twice in its frontmatter`);
 		if (data.name !== (skill ?? agent))
 			add("bad-frontmatter", `\`${path}\` is named \`${data.name}\` in its frontmatter`);
-		const other = names.get(data.name);
-		if (other) add("name-clash", `\`${path}\` and \`${other}\` are both named \`${data.name}\``);
-		names.set(data.name, path);
+		const installed = main.get(path);
+		if (installed !== undefined && data.name !== installed)
+			add(
+				"bad-frontmatter",
+				`\`${path}\` is the main file of block \`${installed}\`, and its frontmatter names it \`${data.name}\``,
+			);
+		const kind = skill ? "skill" : "agent";
+		const other = names.get(`${kind} ${data.name}`);
+		if (other)
+			add("bad-frontmatter", `\`${path}\` and \`${other}\` are both the ${kind} \`${data.name}\``);
+		names.set(`${kind} ${data.name}`, path);
 	}
 
-	// Which output came from which source.
-	let assembly: Record<string, unknown> = {};
+	// Names that lead nowhere.
+	let plugin: string | undefined;
 	try {
-		assembly = JSON.parse(text.get("assembly.json") ?? "");
+		const manifest: unknown = JSON.parse(text.get(MANIFEST) ?? "");
+		plugin = isObj(manifest) && typeof manifest.name === "string" ? manifest.name : undefined;
 	} catch {
-		add("missing-file", "`assembly.json` is missing or not valid JSON");
+		plugin = undefined;
 	}
-	const sourceOf = new Map<string, { block: string; source: string }>();
-	for (const path of files) {
-		if (OWN.has(path)) continue;
-		const entry = assembly[path];
-		if (entry === undefined)
-			add("unlisted-file", `\`${path}\` is not listed in \`assembly.json\``, "warning");
-		else if (typeof entry === "object" && entry !== null) {
-			const { block, source } = entry as { block?: unknown; source?: unknown };
-			if (typeof block === "string" && typeof source === "string")
-				sourceOf.set(path, { block, source });
-		}
-	}
-
-	// Leftovers of components the stack does not use, and references that lead nowhere.
-	const unused = (card: string): boolean => {
-		const used = flat.components.get(cardRef(card)?.type ?? "")?.use;
-		return used !== undefined && used !== card;
-	};
-	const replaced = bundle.cards.filter((card) => unused(card.path));
-	const homes = new Set([...flat.blocks.keys()].map((id) => id.split("/")[0] ?? ""));
-	homes.delete(plugin);
-	for (const [path, body] of text) {
-		if (OWN.has(path)) continue;
-		const from = sourceOf.get(path);
-		const annotation = from ? bundle.annotations.get(from.block) : undefined;
-		const source = from ? join(bundle.dir, from.source) : undefined;
-		const diff =
-			source !== undefined && (await Bun.file(source).exists())
-				? hunks(source, join(dir, path))
-				: undefined;
-		// Source lines the annotation says were written for a component the stack does not use.
-		const meant = (annotation?.touches ?? [])
-			.filter(
-				(touch) => (touch.file ?? annotation?.files[0]) === from?.source && unused(touch.component),
-			)
-			.flatMap((touch) => ranges(touch.lines));
-		/**
-		 * A hit on a line the assembler wrote, or left alone inside such a touch, is the assembler's
-		 * miss. On a line that is the source's own and that no touch covers, the annotation missed it.
-		 */
-		const kept = (line: number): boolean => {
-			const copied = diff ? origin(diff, line) : undefined;
-			return copied !== undefined && !meant.some(([lo, hi]) => copied >= lo && copied <= hi);
-		};
-		const lines = body.split("\n");
-		for (const card of replaced) {
-			for (const fingerprint of card.fingerprints) {
-				const pattern = new RegExp(`(?<![\\w-])${escapeRegExp(fingerprint)}(?![\\w-])`);
-				const hits = lines.flatMap((line, index) => (pattern.test(line) ? [index + 1] : []));
-				const what = `\`${fingerprint}\` belongs to ${card.type} \`${card.name}\`, which the stack does not use`;
-				const missed = hits.filter((line) => !kept(line));
-				const uncovered = hits.filter(kept);
-				if (missed.length > 0) add("leftover", `\`${path}\` line ${missed.join(", ")}: ${what}`);
-				if (uncovered.length > 0) {
-					add(
-						"leftover",
-						`\`${path}\` line ${uncovered.join(", ")}: ${what} (the source's own line, covered by no touch)`,
-						"warning",
-					);
+	if (plugin === undefined) add("missing-file", `\`${MANIFEST}\` is missing or has no \`name\``);
+	else {
+		for (const [path, body] of text) {
+			if (own(path)) continue;
+			body.split("\n").forEach((line, index) => {
+				for (const match of line.matchAll(/(?<![\w/.-])([a-z][\w-]*):([a-z][\w-]*)(?![\w-]*\/)/g)) {
+					if (match[1] === plugin && !bundle.blocks.has(match[2] ?? ""))
+						add(
+							"unresolved-name",
+							`\`${path}\` line ${index + 1}: \`${match[0]}\` is no block of this bundle`,
+						);
 				}
-			}
-		}
-		lines.forEach((line, index) => {
-			const at = `\`${path}\` line ${index + 1}`;
-			for (const match of line.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/([\w./-]+)/g)) {
-				const target = (match[1] ?? "").replace(/[.,;:]+$/, "");
-				if (
-					!files.includes(target) &&
-					!files.some((file) => file.startsWith(`${target.replace(/\/$/, "")}/`))
-				) {
-					add("unresolved-path", `${at}: \`${match[0]}\` is not in the plugin`);
-				}
-			}
-			if (/(\/Users\/|\/home\/)[\w.-]+\/|plugins\/cache\//.test(line))
-				add("absolute-path", `${at}: a path outside the plugin`);
-			for (const match of line.matchAll(/(?<![\w/.-])([a-z][\w-]*):([a-z][\w-]*)(?![\w-]*\/)/g)) {
-				const [whole, owner = "", name = ""] = match;
-				if (homes.has(owner)) {
-					const own = kept(index + 1);
-					add(
-						"home-reference",
-						`${at}: \`${whole}\` refers to the stack the block came from${own ? " (the source's own line, covered by no touch)" : ""}`,
-						own ? "warning" : "error",
-					);
-				} else if (
-					owner === plugin &&
-					!text.has(`skills/${name}/SKILL.md`) &&
-					!text.has(`agents/${name}.md`)
-				)
-					add(
-						"unresolved-handoff",
-						`${at}: \`${whole}\` is not a skill or an agent of this plugin`,
-					);
-			}
-		});
-	}
-
-	// The lead must know every block, and every cell block must report an outcome.
-	const lead = router ? text.get(`skills/${router.as}/SKILL.md`) : undefined;
-	if (!router) add("missing-block", "the stack names no router block");
-	const cells = new Set(
-		[...flat.nodes.values()].flatMap((node) => (node.block ? [node.block] : [])),
-	);
-	for (const [id, block] of flat.blocks) {
-		if (block === router) continue;
-		if (
-			lead !== undefined &&
-			!new RegExp(`(?<![\\w-])${escapeRegExp(block.as)}(?![\\w-])`).test(lead)
-		) {
-			add("unresolved-handoff", `the lead skill never mentions \`${block.as}\` (block \`${id}\`)`);
-		}
-		const body = text.get(installed.get(id) ?? "");
-		if (cells.has(id) && body !== undefined && !body.includes("OUTCOME:")) {
-			add(
-				"missing-outcome",
-				`\`${installed.get(id)}\` never says how to report its outcome (\`OUTCOME: <outcome>\`)`,
-			);
-		}
-	}
-	// A level the lead does not run is written into the block that does.
-	for (const [level, runner] of flat.inside) {
-		const used = new Set(
-			[...flat.nodes.values()].flatMap((node) =>
-				flat.levels[node.level] === level && node.block ? [node.block] : [],
-			),
-		);
-		const holder = used.size === 1 ? ([...used][0] ?? runner) : runner;
-		const body = text.get(installed.get(holder) ?? "");
-		if (body !== undefined && !body.includes(`## The ${level} loop`)) {
-			add(
-				"missing-loop",
-				`\`${installed.get(holder)}\` has no section \`## The ${level} loop\`; the level \`${level}\` runs inside \`${runner}\`, which never sees the lead's tables`,
-			);
-		}
-	}
-	if (lead !== undefined) {
-		for (const level of flat.levels) {
-			if (level && !lead.includes(level))
-				add("unresolved-handoff", `the lead skill never mentions the level \`${level}\``);
+			});
 		}
 	}
 
-	// Changes outside the lines the annotations cover: for a person to look at.
-	for (const [path, from] of sourceOf) {
-		// The router is written for this stack; its source is a starting point, not a text to keep.
-		if (flat.blocks.get(from.block)?.role === "router") continue;
-		const annotation = bundle.annotations.get(from.block);
-		const source = join(bundle.dir, from.source);
-		if (!annotation || !(await Bun.file(source).exists())) {
+	// A block a cell uses reports its outcome the way the block that provides `Routing` says.
+	const routing = bundle.concepts.get("Routing");
+	const router = routing && "block" in routing ? bundle.blocks.get(routing.block) : undefined;
+	const reports = router?.def?.provides.get("Routing");
+	const sentence = reports?.verbs.get("report");
+	const longest = (sentence ?? "")
+		.split(/\{name\}|\{outcome\}/)
+		.map(squash)
+		.sort((a, b) => b.length - a.length)[0];
+	const evidence = reports?.fingerprints.length
+		? reports.fingerprints.map(squash)
+		: [longest ?? ""];
+	if (evidence.some((mark) => mark !== "")) {
+		for (const [name, used] of cells) {
+			const def = bundle.blocks.get(name)?.def;
+			const ends = used.some(
+				({ node }) => ((node.part ? def?.parts.get(node.part) : def?.outcomes) ?? []).length > 0,
+			);
+			const bodies = (written.get(name) ?? []).map((entry) => squash(text.get(entry.path) ?? ""));
+			if (!ends || name === router?.name || bodies.length === 0) continue;
+			if (!bodies.some((body) => evidence.some((mark) => mark !== "" && body.includes(mark))))
+				add(
+					"missing-outcome",
+					`block \`${name}\` is used by ${used.map(({ node }) => node.id).join(", ")} and never says how to report an outcome (\`${router?.name}\`: "${sentence ?? evidence[0]}")`,
+				);
+		}
+	}
+
+	// What is left of the providers the bundle does not use.
+	const replaced = new Map<string, { concept: string; fingerprints: string[]; block?: string }>();
+	for (const block of bundle.blocks.values()) {
+		for (const [concept, provides] of block.def?.provides ?? []) {
+			const choice = bundle.concepts.get(concept);
+			if (choice && "block" in choice && choice.block !== block.name)
+				replaced.set(`${block.name} ${concept}`, {
+					concept,
+					fingerprints: provides.fingerprints,
+					block: block.name,
+				});
+		}
+	}
+	const absent = new Map<string, string>();
+	for (const block of bundle.blocks.values()) {
+		for (const [concept, use] of usesOf(block)) {
+			const id = use.writtenFor;
+			if (id?.includes("/") && !keeps(bundle, concept, id)) absent.set(`${id} ${concept}`, id);
+		}
+	}
+	for (const [key, id] of absent) {
+		const concept = key.slice(id.length + 1);
+		if ([...bundle.blocks.values()].some((block) => block.from === id)) continue;
+		const folder = catalog === undefined ? undefined : join(catalog, id);
+		if (folder === undefined || !isDir(folder)) {
 			add(
-				"unresolved-path",
-				`\`assembly.json\`: \`${path}\` names block \`${from.block}\` and source \`${from.source}\`; one of them is not in the bundle`,
+				"fingerprints-not-checked",
+				catalog === undefined
+					? `the bundle replaces \`${id}\` for \`${concept}\`, which is not in the bundle: give \`--catalog <folder>\` to look for what is left of it`
+					: `the bundle replaces \`${id}\` for \`${concept}\`, and \`${folder}\` is not in the catalog`,
+				"warning",
 			);
 			continue;
 		}
-		const main = annotation.files[0];
-		const covered = [...annotation.touches, ...annotation.mentions]
-			.filter((entry) => (entry.file ?? main) === from.source)
-			.flatMap((entry) => ranges(entry.lines))
-			.map(([first, last]) => [first - 1, last + 1] as [number, number])
-			.sort((a, b) => a[0] - b[0])
-			// Touches one line apart (a blank line between them) cover one stretch: a change may span both.
-			.reduce<[number, number][]>((merged, range) => {
-				const last = merged.at(-1);
-				if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
-				else merged.push(range);
-				return merged;
-			}, []);
-		// The installed name is the stack's choice, so a new `name` in the frontmatter is expected.
-		const sourceLines = (await Bun.file(source).text()).split("\n");
-		const head = sourceLines[0] === "---" ? sourceLines.indexOf("---", 1) : 0;
-		const naming = (line: number) => line <= head && /^name:/.test(sourceLines[line - 1] ?? "");
-		const outside = hunks(source, join(dir, path))
-			// Added lines replace nothing of the source, so they are not a change to it.
-			.filter((hunk) => hunk.removed > 0)
-			.map((hunk) => [hunk.from, hunk.from + hunk.removed - 1] as const)
-			.filter(([first, last]) => !(first === last && naming(first)))
-			.filter(([first, last]) => !covered.some(([lo, hi]) => first >= lo && last <= hi))
-			.map(([first, last]) => (first === last ? `${first}` : `${first}-${last}`));
-		if (outside.length > 0) {
-			add(
-				"uncovered-change",
-				`\`${path}\` changes lines of \`${from.source}\` that no touch covers: ${outside.join(", ")}`,
-				"warning",
-			);
+		const provides = loadBlock(folder, id).header?.provides.get(concept);
+		if (provides) replaced.set(key, { concept, fingerprints: provides.fingerprints });
+	}
+	for (const [key, { concept, fingerprints, block }] of replaced) {
+		const provider = block ?? key.split(" ")[0];
+		for (const entry of listed) {
+			if (entry.block === block) continue;
+			const lines = (text.get(entry.path) ?? "").split("\n");
+			for (const betrays of fingerprints) {
+				if (betrays === "") continue;
+				const pattern = fingerprint(betrays);
+				const hits = lines.flatMap((line, index) => (line.search(pattern) >= 0 ? [index + 1] : []));
+				if (hits.length > 0)
+					add(
+						"leftover-fingerprint",
+						`\`${entry.path}\` line ${hits.join(", ")}: \`${betrays}\` belongs to \`${provider}\`, which does not provide \`${concept}\` in this bundle (the import missed a mark, or a passage was kept)`,
+						"warning",
+					);
+			}
 		}
 	}
 	return findings;
