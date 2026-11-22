@@ -42,13 +42,17 @@ export function repeated(text: string, section: string): string[] {
 	return [...twice];
 }
 
+/** The id texts written for a block name it by: its `from`, or the `id` in an imported block's header. */
+export const idOf = (block: BundleBlock | undefined): string | undefined =>
+	block?.from ?? block?.loaded?.header?.id;
+
 /** Whether the bundle keeps what a text was written for: the provider it names is the one chosen. */
 export function keeps(bundle: Bundle, concept: string, writtenFor: string | undefined): boolean {
 	const choice = bundle.concepts.get(concept);
 	if (!choice) return true;
 	if ("asWritten" in choice) return true;
-	const provider = bundle.blocks.get(choice.block);
-	return provider?.from !== undefined && provider.from === writtenFor;
+	const id = idOf(bundle.blocks.get(choice.block));
+	return id !== undefined && id === writtenFor;
 }
 
 /** What a block's text relies on, with the routing its marks imply. */
@@ -260,8 +264,11 @@ export function loadBundle(dir: string): LoadedBundle {
 						"wrong-block",
 						`\`blocks/${name}/\` holds ${head.id ? `\`${head.id}\`` : "a block with no `id`"}, and \`from\` says \`${from}\``,
 					);
-				if (head && origin === "imported" && (head.id !== undefined || head.source !== undefined))
-					report("invalid", "an imported block has no `id` and no `source` in its header");
+				if (head && origin === "imported" && head.source !== undefined)
+					report(
+						"invalid",
+						"an imported block has no `source` in its header: a block of the catalog is listed with `from`",
+					);
 			}
 		}
 		blocks.set(name, block);

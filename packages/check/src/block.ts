@@ -18,6 +18,7 @@ import type {
 	Finding,
 	Header,
 	Io,
+	Name,
 	Provide,
 	Severity,
 	Use,
@@ -149,11 +150,18 @@ export function definition(raw: Obj, report: Report): Definition {
 			}
 		} else if (value.verbs !== undefined && value.verbs !== null)
 			bad(`\`provides.${concept}.verbs\` must map each verb to a sentence`);
-		const names = new Map<string, string>();
+		const names = new Map<string, Name>();
+		const said = (word: unknown): word is string => typeof word === "string" && word.trim() !== "";
 		for (const [name, word] of Object.entries(isObj(value.names) ? value.names : {})) {
-			if (typeof word !== "string" || word.trim() === "")
-				bad(`\`provides.${concept}.names.${name}\` must be the provider's word for it`);
-			else names.set(name, word);
+			const one = isObj(word) ? word.one : word;
+			const many = isObj(word) ? word.many : undefined;
+			const known =
+				!isObj(word) || Object.keys(word).every((key) => key === "one" || key === "many");
+			if (!known || !said(one) || (many !== undefined && !said(many)))
+				bad(
+					`\`provides.${concept}.names.${name}\` must be the provider's word for it, or \`{ one: <word>, many: <word> }\``,
+				);
+			else names.set(name, many === undefined ? { one } : { one, many });
 		}
 		provides.set(concept, {
 			verbs,
@@ -275,8 +283,8 @@ function header(text: string, report: Report): Header | undefined {
 	}
 	if (raw.id !== undefined && (typeof raw.id !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(raw.id)))
 		report("bad-header", "`id` must be `<stack>/<block>`");
-	if ((raw.id === undefined) !== (source === undefined))
-		report("bad-header", "`id` and `source` go together: a block of a stack has both");
+	if (raw.id === undefined && source !== undefined)
+		report("bad-header", "`source` needs `id`: only a block of a stack says where its files are");
 	return {
 		...def,
 		id: typeof raw.id === "string" ? raw.id : undefined,
@@ -288,8 +296,25 @@ function header(text: string, report: Report): Header | undefined {
 }
 
 /** Reports where the header and the marks of a block disagree. */
-function agree(head: Header, marks: FileMark[], report: Report) {
+function agree(head: Header, marks: FileMark[], originals: Map<string, string>, report: Report) {
 	const at = (mark: FileMark) => `${mark.file}:${mark.line}`;
+	/** What a mark covers besides the names inside it. */
+	const around = (mark: FileMark) => {
+		const text = originals.get(mark.file) ?? "";
+		let rest = "";
+		let pos = mark.start;
+		for (const name of marks) {
+			if (name.tag !== "name" || name.parent !== mark) continue;
+			rest += text.slice(pos, name.start);
+			pos = name.end;
+		}
+		return pos === mark.start ? undefined : rest + text.slice(pos, mark.end);
+	};
+	/** Whether a mark holds a name and nothing that makes it a passage: no word, no brackets of its own. */
+	const nameAlone = (mark: FileMark) => {
+		const rest = around(mark)?.trim();
+		return rest !== undefined && !/[\p{L}\p{N}]/u.test(rest) && !/^[([].*[)\]]$/s.test(rest);
+	};
 	const undeclared = (mark: FileMark, message: string) =>
 		report("undeclared-name", `${at(mark)}: ${message}`);
 	const outcomes = new Set(
@@ -304,6 +329,13 @@ function agree(head: Header, marks: FileMark[], report: Report) {
 				seen.refs.add(to);
 				if (to && !head.references.has(to))
 					undeclared(mark, `\`fs:ref\` names \`${to}\`, which is not under \`references\``);
+				// Bound to nothing, the passage is taken out: a mark over the name alone leaves a hole.
+				else if (head.references.get(to)?.required === false && nameAlone(mark))
+					report(
+						"narrow-mark",
+						`${at(mark)}: \`fs:ref\` to \`${to}\`, which is optional, covers only its name: when nothing stands for it the sentence around is left with a hole. Mark all the text that only makes sense when the block is there`,
+						"warning",
+					);
 				break;
 			case "uses": {
 				const use = head.uses.get(concept);
@@ -423,7 +455,7 @@ export function readBlock(files: Map<string, string>, label: string): Block {
 		if (!originals.has(file))
 			report("missing-file", `\`${file}\` is listed under \`files\` and is not in the folder`);
 	}
-	agree(head, marks, report);
+	agree(head, marks, originals, report);
 	return { header: head, main, headerLines, originals, marks, findings };
 }
 

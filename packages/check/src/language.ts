@@ -26,7 +26,10 @@ export const PROVIDED = new Map<string, { verbs: string[]; traits: string[] }>([
 	["Requirement", { verbs: ["list", "cite", "verdict"], traits: ["stable-ids"] }],
 	[
 		"Executor",
-		{ verbs: ["dispatch", "result"], traits: ["fresh-context", "parallel", "cross-model-review"] },
+		{
+			verbs: ["dispatch", "result"],
+			traits: ["fresh-context", "parallel", "cross-model-review", "resume"],
+		},
 	],
 	["Routing", { verbs: ["report"], traits: [] }],
 ]);

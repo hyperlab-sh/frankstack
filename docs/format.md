@@ -19,7 +19,8 @@ licenses/<stack>/LICENSE  the licence of each stack a block was taken from
 Three kinds of content, never mixed in one file:
 
 - **The same in every bundle**: `AGENTS.md`, `CLAUDE.md`, `ASSEMBLE.md`, `FORMAT.md`,
-  `LANGUAGE.md`, and a target's file.
+  `LANGUAGE.md`, and a target's file. Their source is `docs/bundle/`, this file and
+  `docs/language.md`.
 - **Catalog data**: the folder of a catalog block and `licenses/`. A copy, unchanged. It says
   nothing about this bundle.
 - **The person's**: `README.md`, `bundle.yaml`, and the folder of an imported block.
@@ -225,11 +226,17 @@ subagent-driven-development to carry out the plan.</fs:route>
 
 Header keys:
 
-- `id` is `<stack>/<block>`. An imported block has no `id` and no `source`.
+- `id` is `<stack>/<block>`: the name other blocks' `references` and `written-for` know this
+  block by. A block of the catalog has `id` and `source`. An imported block has no `source`. It
+  has an `id` when other blocks the person brought were written for it: with
+  `id: hyper/ship-auto` in its header, text with `written-for: hyper/ship-auto` stays as written
+  when this block is the one that provides the concept. Without an `id`, no text counts as
+  written for it.
 - `source` says where the block's files are in the stack's repository. `commit` is written in
   quotes: without them a commit of digits only is read as a number. `path` is the block's folder,
   or the file itself for a block of one file.
-- A block with `fs:route` marks relies on `Routing` and does not list it under `uses`.
+- A block with `fs:route` marks relies on `Routing` and does not list it under `uses` for them.
+  It lists `Routing` there when a `fs:uses` mark names it, as for any concept.
 - `uses.<Concept>.written-for` says what the text was written for: the id of the block that
   provides the concept in its stack (`lavra/beads`), or the stack's name when the stack has no
   such block and its way of doing it is only in the text of its blocks (`superpowers`). `verbs` lists the verbs
@@ -247,10 +254,14 @@ Header keys:
       names:                                # what this provider calls each concept it names
         Task: bead
         TaskId: "BD-<n>"
-        Criterion: "an entry of the bead's `## Validation` section"
+        TaskDefinition: "the bead's `## What` section"
       traits: []
       fingerprints: ["bd ", ".beads/"]      # strings that betray this provider in a text
   ```
+
+  A name is the provider's word for one of them. Where the word for several does not follow
+  from it, the provider gives both: `Criterion: { one: acceptance criterion, many: acceptance
+  criteria }`.
 
   The block that provides `Routing` gives `report`, where `{outcome}` stands for the outcome's
   name. Its text also says how the lead of a flow is written; the assembler reads it for that.
@@ -285,6 +296,10 @@ How marks are written:
 - Taking out every tag, and the header with the line break after it, gives the original file byte
   for byte. The SHA-256 under `files` is of that original.
 - A file that already contains `<fs:` or `</fs:` cannot be marked.
+- Marks go into frontmatter as into any other text: a `description` that says "bead" has the
+  same `fs:concept` mark as the body.
+- `fs:artifact` has a `fs:path` only where the text gives a literal place. A commit, a reply, or
+  a document whose place the caller gives has none.
 
 How marks are placed:
 
@@ -294,7 +309,9 @@ How marks are placed:
   it correct. `fs:uses` and `fs:route` cover whole sentences or list items, because a sentence
   replaces them.
 - A mark for something optional (a reference with `required: false`, an input that is not
-  required) covers all the text that only makes sense when the thing is there.
+  required) covers all the text that only makes sense when the thing is there. A `fs:ref` to an
+  optional reference that holds its `fs:name` and no word beside it is reported as a warning,
+  unless it is a whole aside in brackets: taken out, it leaves "(read by )".
 - A link is made with the thing's own name: `to` is an id; `concept`, `verb` and the `name` of
   `fs:concept` are terms of the language; the `name` of `fs:artifact` and `fs:part` is a key of
   `inputs`, `outputs` or `parts`. Every name a mark uses is declared in the header, and every
@@ -307,11 +324,11 @@ How marks are placed:
 | `fs:block` | | takes it out. |
 | `fs:ref` | the reference is bound to a block | writes that block's name in place of each `fs:name`. |
 | `fs:ref` | the reference is bound to `null` | takes the passage out. |
-| `fs:uses` | the bundle keeps what the text was written for: the concept's block is the one under `written-for`, or the concept is `as-written` | leaves the text. |
+| `fs:uses` | the bundle keeps what the text was written for: the concept's block is the one under `written-for` (by its `from`, or by the `id` in its header when it is imported), or the concept is `as-written` | leaves the text. |
 | `fs:uses` with `verb` | another block provides the concept | writes that block's sentence for the verb in place of the passage. |
 | `fs:uses` with `purpose` | another block provides the concept | rewrites the passage so that its purpose is met with that block, takes it out when the purpose does not apply, or keeps it when it still holds; lists the passage in the report. |
 | `fs:concept` | the concept is one a provider names, and the bundle keeps what the text was written for | leaves the words. |
-| `fs:concept` | the concept is one a provider names, and another block is that provider | writes that block's name for the concept, in the same number and case; the concept's name as ordinary words ("task") when the block gives none. |
+| `fs:concept` | the concept is one a provider names, and another block is that provider | writes that block's name for the concept, in the same number and case (its `many` for several, when it gives one); the concept's name as ordinary words ("task") when the block gives none. |
 | `fs:concept` | any other concept | leaves the words. The mark only says what they mean. |
 | `fs:route` | a block provides `Routing` | writes that block's `report` sentence, with the outcome's name, in place of the passage. |
 | `fs:route` | `Routing` is `as-written` | leaves the text. |
@@ -394,7 +411,8 @@ bound to it: it must work as those passages use it.
 - **Blocks**: a block with no folder, a folder with no block, a folder for a `created` block; a
   file whose text without marks does not have the SHA-256 the header gives; a tag that is not
   closed, overlaps another or is unknown; a name in a mark the header does not declare, and the
-  reverse; a concept, verb or trait that is not in the language.
+  reverse; a concept, verb or trait that is not in the language; as a warning, the mark of an
+  optional reference that covers only its name.
 - **Choices**: a reference with no entry, bound to a name that is no block, bound to a block of
   another kind, or required and bound to `null`; a concept in use with no entry, or whose block
   does not provide it; `as-written` for a concept when a block that uses it was written for
@@ -423,7 +441,9 @@ missing; bad or duplicate frontmatter.
 Warnings: a file of the assembly that `assembly.json` does not list; a fingerprint of a provider
 the bundle does not use (the import missed a mark, or a passage was kept). The fingerprints of a
 provider that is not in the bundle are read from the catalog; without `--catalog` the checker
-says that it did not look for them.
+says that it did not look for them. A fingerprint that the chosen provider's sentences, names or
+fingerprints also hold, or that is part of a path under `files`, is not looked for: the
+assembly has it for its own reasons, so it says nothing about what was left.
 
 A passage marked with `purpose` is never reported, whatever the assembler did with it. The
 checks of names and frontmatter are those of the target `claude-code-plugin`. The checker cannot

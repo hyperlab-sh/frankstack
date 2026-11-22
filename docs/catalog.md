@@ -87,7 +87,8 @@ pending:                  # blocks that are not imported yet: the name of each, 
    `pending` at a path the source has; every term is in the
    language; no fingerprint of one of the stack's providers is left outside a mark that ties the
    passage to it (`fs:uses` of that concept, `fs:concept` of the concept or of a name it owns,
-   `fs:ref` to the provider).
+   `fs:ref` to the provider). As a warning: the mark of an optional reference that covers only
+   its name.
 6. **Report.** `catalog/<stack>/IMPORT-REPORT.md`, for the operator to review:
    - **Added to the language**: each concept, verb or trait the import added, its definition, and
      the passages that led to it. The operator keeps it, renames it or takes it back.
@@ -122,7 +123,32 @@ Each step names who gives the information. Today every step is done by hand.
 
 ## What is not known yet
 
-- No stack has been imported whole, and `pending` has not been used on a real stack. The twelve blocks of the first test bundle were mapped by
+- No stack has been imported whole. The first import took seven blocks of four stacks
+  (`superpowers` 4, `compound-engineering` 1, `lavra` 1, `pstack` 1; 1,324 lines), each stack
+  marked by one agent that had the documents and the clone and nothing else. All four pass the
+  check. The agents report 3 to 10 minutes a stack, about 21 in all. They placed 96 `fs:concept`
+  marks, 11 `fs:uses` marks with a verb and 27 with `purpose`: 13 in the three `superpowers`
+  prompts (`Executor` and `Routing`), 13 in the `compound-engineering` agent (`Memory`), 1 in
+  `pstack`, none in `lavra`. They proposed nine terms and called one certain, which is now in the language. `superpowers`
+  lists five blocks under `pending`. No stack has one block that provides a concept:
+  `written-for` is the stack's name in every header, and step 4 has not been done once.
+- The import left these questions open. Each is in a report, under "Gaps in the documents":
+  - A line that reports any of several outcomes (`Status: DONE | BLOCKED | …`) cannot be a
+    `fs:route`, which stands for one outcome. It is marked `fs:uses` with `purpose` for now.
+  - `fs:route` needs a block to pass control to. A prompt or an agent that only answers its
+    caller has none in its text: one import named the block that dispatches it, two wrote no
+    route.
+  - A `purpose` mark needs a concept, and some passages rely on something no concept is close to
+    (a project glossary, a set of rule files).
+  - No artifact kind fits one task's text, the caller's description of the work, or a search
+    result that is not kept; and one output can be both `findings` and `verdict`.
+  - Whether the repository's agent instruction file (`AGENTS.md`, `CLAUDE.md`) is `Memory`.
+  - `fs:uses` covers whole sentences, and a sentence can also say something the provider's
+    sentence drops. An output's `fs:artifact` passage is taken out when no cell gives the
+    output, which can take an instruction with it.
+  - A verb mark over several headed sections leaves "Step 3" in other passages pointing at
+    text that is gone.
+- The twelve blocks of the first test bundle were mapped by
   hand, under format v1. In those maps 62 uses of `TaskStorage`, `Memory`, `Decisions`,
   `Requirement` and `Executor` name no verb, and 48 of them, in 8 of the 12 blocks, were written
   for a provider that bundle does not use. Read one by one, about 13 of the 48 are a stack's

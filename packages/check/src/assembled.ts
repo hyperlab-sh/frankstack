@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fingerprint, isObj, loadBlock, norm, walk } from "./block.ts";
-import { isDir, keeps, usesOf } from "./bundle.ts";
+import { idOf, isDir, keeps, usesOf } from "./bundle.ts";
 import { base } from "./flow.ts";
 import { NAMED } from "./language.ts";
 import { utf8 } from "./marks.ts";
@@ -44,7 +44,8 @@ type Expect =
 	| { kind: "gone"; why: string }
 	| { kind: "sentence"; sentence: string; name?: string; outcome?: string; what: string }
 	| { kind: "contains"; text: string; what: string }
-	| { kind: "renamed"; expected: string; what: string };
+	/** The words are any of `expected`: the provider's word for one, or for several. */
+	| { kind: "renamed"; expected: string[]; what: string };
 
 type Hole = { mark: FileMark; was: string; expect: Expect };
 type Item = { phrase: string; line: number } | { hole: Hole };
@@ -107,9 +108,9 @@ function expectation(
 			const called = other?.def?.provides.get(owner)?.names.get(name);
 			return {
 				kind: "renamed",
-				expected: called ?? ordinary(name),
+				expected: called ? [called.one, ...(called.many ? [called.many] : [])] : [ordinary(name)],
 				what: called
-					? `\`${other?.name}\` calls a ${name} "${called}"`
+					? `\`${other?.name}\` calls a ${name} "${called.one}"`
 					: `\`${other?.name}\` gives no name for ${name}, so the ordinary word goes there`,
 			};
 		}
@@ -228,7 +229,8 @@ function wrong(hole: Hole, window: string): string | undefined {
 				? undefined
 				: `the passage should have ${expect.what}`;
 		case "renamed":
-			return window === was && !was.toLowerCase().includes(expect.expected.toLowerCase())
+			return window === was &&
+				!expect.expected.some((word) => was.toLowerCase().includes(word.toLowerCase()))
 				? `the passage still says "${was}": ${expect.what}`
 				: undefined;
 	}
@@ -599,7 +601,7 @@ export function checkAssembled(
 	}
 	for (const [key, id] of absent) {
 		const concept = key.slice(id.length + 1);
-		if ([...bundle.blocks.values()].some((block) => block.from === id)) continue;
+		if ([...bundle.blocks.values()].some((block) => idOf(block) === id)) continue;
 		const folder = catalog === undefined ? undefined : join(catalog, id);
 		if (folder === undefined || !isDir(folder)) {
 			add(
@@ -614,13 +616,31 @@ export function checkAssembled(
 		const provides = loadBlock(folder, id).header?.provides.get(concept);
 		if (provides) replaced.set(key, { concept, fingerprints: provides.fingerprints });
 	}
+	// A string the chosen provider says too, or that is in a place the bundle keeps an artifact at,
+	// betrays nobody: the assembly has it for its own reasons.
+	const places = bundle.flows.flatMap((flat) => [...flat.paths.values()]);
+	const shared = (concept: string, betrays: string) => {
+		const choice = bundle.concepts.get(concept);
+		const chosen =
+			choice && "block" in choice
+				? bundle.blocks.get(choice.block)?.def?.provides.get(concept)
+				: undefined;
+		const own = [
+			...[...(chosen?.verbs.values() ?? [])].map((sentence) => sentence ?? ""),
+			...[...(chosen?.names.values() ?? [])].flatMap((name) => [name.one, name.many ?? ""]),
+			...(chosen?.fingerprints ?? []),
+			...places,
+		];
+		const pattern = new RegExp(fingerprint(betrays).source, "i");
+		return own.some((said) => pattern.test(said));
+	};
 	for (const [key, { concept, fingerprints, block }] of replaced) {
 		const provider = block ?? key.split(" ")[0];
 		for (const entry of listed) {
 			if (entry.block === block) continue;
 			const lines = (text.get(entry.path) ?? "").split("\n");
 			for (const betrays of fingerprints) {
-				if (betrays === "") continue;
+				if (betrays === "" || shared(concept, betrays)) continue;
 				const pattern = fingerprint(betrays);
 				const hits = lines.flatMap((line, index) => (line.search(pattern) >= 0 ? [index + 1] : []));
 				if (hits.length > 0)

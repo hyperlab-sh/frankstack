@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { keeps, loadBundle, repeated, usesOf } from "../src/bundle.ts";
+import { idOf, keeps, loadBundle, repeated, usesOf } from "../src/bundle.ts";
 import type { Finding } from "../src/types.ts";
 import { BLOCKS, BUNDLE, block, bundle, one, remade, rules, swap, temp } from "./fixture.ts";
 
@@ -71,6 +71,31 @@ describe("a sound bundle", () => {
 		expect(keeps(read, "Memory", "alpha")).toBe(true);
 		const asWritten = load(yaml("TaskStorage: tasks", "TaskStorage: { as-written: alpha }")).bundle;
 		expect(asWritten && keeps(asWritten, "TaskStorage", "alpha")).toBe(true);
+	});
+
+	test("keeps a text written for an imported provider that says which block it is", () => {
+		const source = 'source: { repo: example/beta, commit: "2222222", path: skills/tasks }\n';
+		const own = {
+			...yaml("tasks: { from: beta/tasks }", "tasks: { origin: imported }"),
+			blocks: { tasks: remade("tasks", { header: (header) => swap(header, source, "") }) },
+		};
+		const { bundle: read, findings } = load(own);
+		expect(findings).toEqual([]);
+		expect(read?.blocks.get("tasks")?.from).toBeUndefined();
+		expect(read && idOf(read.blocks.get("tasks"))).toBe("beta/tasks");
+		expect(read && keeps(read, "TaskStorage", "beta/tasks")).toBe(true);
+		expect(read && keeps(read, "TaskStorage", "alpha")).toBe(false);
+		// With no id, nothing can have been written for it.
+		const nameless = load({
+			...own,
+			blocks: {
+				tasks: remade("tasks", {
+					header: (header) => swap(swap(header, source, ""), "id: beta/tasks\n", ""),
+				}),
+			},
+		}).bundle;
+		expect(nameless && idOf(nameless.blocks.get("tasks"))).toBeUndefined();
+		expect(nameless && keeps(nameless, "TaskStorage", "beta/tasks")).toBe(false);
 	});
 });
 
@@ -174,7 +199,9 @@ describe("the blocks of a bundle", () => {
 			found(yaml("execute: { from: alpha/execute }", "execute: { origin: imported }")).map(
 				(finding) => finding.message,
 			),
-		).toEqual(["block `execute`: an imported block has no `id` and no `source` in its header"]);
+		).toEqual([
+			"block `execute`: an imported block has no `source` in its header: a block of the catalog is listed with `from`",
+		]);
 	});
 
 	test("a block listed twice", () => {
