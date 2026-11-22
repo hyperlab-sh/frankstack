@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { analyze } from "../src/analyze.ts";
 import { loadStack } from "../src/load.ts";
-import type { Annotation, Finding } from "../src/types.ts";
+import type { Annotation, CapabilityLevel, Finding } from "../src/types.ts";
 
 /** A sound one-level stack: plan, build, review with a bounded fix loop, learn. */
 const BASE = `
@@ -12,7 +12,7 @@ inputs: [request]
 artifacts:
   learnings: { scope: cross-run }
 components:
-  TaskStorage: { impl: tasks-md, replaces: [beads], capabilities: { claim: native, ready-queue: emulated, sync: missing } }
+  TaskStorage: components/TaskStorage/tasks-md.md
 blocks:
   a/plan: { kind: skill, as: plan, role: router }
   b/build: { kind: skill, as: build }
@@ -87,8 +87,19 @@ steps:
           fail: { to: build, max: 2, then: escalated }
 `;
 
+/** What the cards of the fixture stacks declare. */
+const CARDS = new Map([
+	[
+		"components/TaskStorage/tasks-md.md",
+		new Map<string, CapabilityLevel>([
+			["claim", "native"],
+			["ready-queue", "emulated"],
+			["sync", "missing"],
+		]),
+	],
+]);
 const check = (yaml: string, annotations?: Map<string, Annotation>): Finding[] => {
-	const { flat, findings } = loadStack(yaml);
+	const { flat, findings } = loadStack(yaml, CARDS);
 	return flat ? [...findings, ...analyze(flat, annotations)] : findings;
 };
 const errors = (yaml: string, annotations?: Map<string, Annotation>) =>
@@ -323,13 +334,26 @@ describe("whole-stack rules", () => {
 		expect(rules(errors(hooks("SessionStart")))).toContain("hook-clash");
 		expect(errors(hooks("Stop"))).toEqual([]);
 	});
-	test("a capability the chosen implementation lacks", () => {
+	test("a capability the component the stack uses lacks", () => {
 		expect(
 			one(
 				errors(swap(BASE, "needs: [TaskStorage.claim]", "needs: [TaskStorage.sync]")),
 				"missing-capability",
 			).message,
 		).toContain("cannot provide");
+	});
+	test("a component is the path of its card, of the type it is listed under", () => {
+		const component = (value: string) =>
+			errors(
+				swap(BASE, "TaskStorage: components/TaskStorage/tasks-md.md", `TaskStorage: ${value}`),
+			);
+		expect(one(component("tasks-md"), "invalid").message).toContain(
+			"components/TaskStorage/<name>.md",
+		);
+		expect(rules(component("components/Memory/tasks-md.md"))).toContain("invalid");
+		expect(one(component("components/TaskStorage/gone.md"), "invalid").message).toContain(
+			"is not in the bundle",
+		);
 	});
 	test("a capability of a component the stack does not have", () => {
 		expect(
@@ -374,19 +398,16 @@ describe("blocks' own declarations", () => {
 			rules(errors(swap(BASE, "    block: c/review", "    block: c/review#nope"), annotations)),
 		).toContain("invalid");
 	});
-	test("a block written for an implementation the stack has no card for", () => {
-		const touch = (impl: string) => [{ component: "TaskStorage", impl, lines: "3-4" }];
-		expect(
+	test("a block written for a component of a type the stack does not use", () => {
+		const touch = (component: string) => [{ component, lines: "3-4" }];
+		const withTouch = (component: string) =>
 			errors(
 				BASE,
-				all().set("b/build", annotation("b/build", ["done"], { touches: touch("beads") })),
-			),
-		).toEqual([]);
-		const findings = errors(
-			BASE,
-			all().set("b/build", annotation("b/build", ["done"], { touches: touch("linear") })),
-		);
-		expect(one(findings, "invalid").message).toContain("`linear`");
+				all().set("b/build", annotation("b/build", ["done"], { touches: touch(component) })),
+			);
+		expect(withTouch("components/TaskStorage/beads.md")).toEqual([]);
+		expect(one(withTouch("components/Memory/wiki.md"), "invalid").message).toContain("`Memory`");
+		expect(one(withTouch("TaskStorage"), "invalid").message).toContain("not a card path");
 	});
 	test("a listed block without an annotation", () => {
 		const annotations = all();
@@ -482,6 +503,43 @@ describe("levels", () => {
 			"    outcomes: { done: verify }\n",
 		);
 		expect(rules(errors(yaml))).toEqual(["invalid"]);
+	});
+	test("`files` gives a path per artifact, for every level or for one", () => {
+		const yaml = swap(
+			LEVELED,
+			"steps:\n",
+			"files:\n  define: { epic: notes/define.md, task: notes/briefs/<ref>.md }\n  children: notes/tasks.md\n  result: notes/result.md\n  verdict: notes/verdict.md\nsteps:\n",
+		);
+		const { flat } = loadStack(yaml);
+		expect(flat?.paths.get("define@task")).toBe("notes/briefs/<ref>.md");
+		expect(flat?.paths.get("children")).toBe("notes/tasks.md");
+		expect(check(yaml).filter((f) => f.rule === "no-path")).toEqual([]);
+	});
+	test("an artifact that is written and has no path is a warning, once `files` is used", () => {
+		expect(check(LEVELED).filter((f) => f.rule === "no-path")).toEqual([]);
+		const yaml = swap(LEVELED, "steps:\n", "files:\n  children: notes/tasks.md\nsteps:\n");
+		const missing = check(yaml).filter((f) => f.rule === "no-path");
+		expect(missing.every((f) => f.severity === "warning")).toBe(true);
+		expect(missing.map((f) => f.message).join()).toContain("`verdict@epic`");
+		expect(missing.map((f) => f.message).join()).not.toContain("`children@epic`");
+	});
+	test("`files` with a level the stack does not have, or a path that is not text", () => {
+		const bad = (files: string) => errors(swap(LEVELED, "steps:\n", `files:\n${files}\nsteps:\n`));
+		expect(one(bad("  define: { story: notes/define.md }"), "invalid").message).toContain("story");
+		expect(one(bad("  define: { epic: [a] }"), "invalid").message).toContain("files.define.epic");
+		expect(one(bad("  define: [a]"), "invalid").message).toContain("files.define");
+	});
+	test("`inside` names a level below the first and a block of the stack", () => {
+		const leveled = LEVELED.replace(
+			"steps:\n",
+			"blocks:\n  a/lead: { kind: skill, as: lead, role: router }\n  a/dev: { kind: prompt, as: dev }\nsteps:\n",
+		);
+		const inside = (value: string) => swap(leveled, "steps:\n", `inside: ${value}\nsteps:\n`);
+		const { flat } = loadStack(inside("{ task: a/dev }"));
+		expect(flat?.inside.get("task")).toBe("a/dev");
+		expect(one(errors(inside("{ epic: a/dev }")), "invalid").message).toContain("`epic`");
+		expect(one(errors(inside("{ story: a/dev }")), "invalid").message).toContain("`story`");
+		expect(rules(errors(inside("{ task: a/nobody }")))).toEqual(["invalid"]);
 	});
 	test("`child:` below the last level is invalid", () => {
 		expect(

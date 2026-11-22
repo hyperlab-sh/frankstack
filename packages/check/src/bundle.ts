@@ -1,6 +1,9 @@
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { Annotation, Card, Finding } from "./types.ts";
+import { cardRef } from "./load.ts";
+import type { Annotation, CapabilityLevel, Card, Finding } from "./types.ts";
+
+const LEVELS: CapabilityLevel[] = ["native", "emulated", "missing"];
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -40,13 +43,34 @@ export type Bundle = {
 	findings: Finding[];
 };
 
-/** Reads the block annotations and the implementation cards of a bundle folder. */
+/** Top-level keys written twice in a frontmatter: YAML keeps one and says nothing. */
+export function duplicateKeys(text: string): string[] {
+	const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/.exec(text);
+	const seen = new Set<string>();
+	const twice = new Set<string>();
+	for (const line of (match?.[1] ?? "").split(/\r?\n/)) {
+		const key = /^([A-Za-z_][\w-]*):/.exec(line)?.[1];
+		if (key === undefined) continue;
+		if (seen.has(key)) twice.add(key);
+		seen.add(key);
+	}
+	return [...twice];
+}
+
+/** Reads the block annotations and the component cards of a bundle folder. */
 export async function loadBundle(dir: string): Promise<Bundle> {
 	const findings: Finding[] = [];
 	const annotations = new Map<string, Annotation>();
 	const cards: Card[] = [];
 	const read = async (path: string) => {
-		const data = frontmatter(await Bun.file(join(dir, path)).text());
+		const text = await Bun.file(join(dir, path)).text();
+		const data = frontmatter(text);
+		for (const key of duplicateKeys(text))
+			findings.push({
+				rule: "invalid",
+				severity: "error",
+				message: `${path}: the key \`${key}\` is written twice`,
+			});
 		if (!data)
 			findings.push({
 				rule: "invalid",
@@ -55,10 +79,11 @@ export async function loadBundle(dir: string): Promise<Bundle> {
 			});
 		return data;
 	};
-	for (const path of walk(dir, "blocks").filter((p) => p.endsWith(".md"))) {
+	for (const path of walk(dir, "annotations").filter((p) => p.endsWith(".md"))) {
 		const data = await read(path);
 		if (!data) continue;
-		const block = typeof data.block === "string" ? data.block : path.slice("blocks/".length, -3);
+		const block =
+			typeof data.block === "string" ? data.block : path.slice("annotations/".length, -3);
 		const parts = new Map<string, { lines: string; outcomes: string[] }>();
 		for (const [name, value] of Object.entries(isObj(data.parts) ? data.parts : {})) {
 			if (isObj(value))
@@ -69,7 +94,6 @@ export async function loadBundle(dir: string): Promise<Bundle> {
 			.filter(isObj)
 			.map((touch) => ({
 				component: String(touch.component ?? ""),
-				impl: String(touch.impl ?? ""),
 				file: typeof touch.file === "string" ? touch.file : undefined,
 				lines: String(touch.lines ?? ""),
 			}));
@@ -87,6 +111,15 @@ export async function loadBundle(dir: string): Promise<Bundle> {
 					rule: "invalid",
 					severity: "error",
 					message: `${path}: lines \`${touch.lines}\` are not \`n\`, \`n-m\` or a comma list of those`,
+				});
+			}
+		}
+		for (const card of new Set(touches.map((touch) => touch.component))) {
+			if (cardRef(card) && !(await Bun.file(join(dir, card)).exists())) {
+				findings.push({
+					rule: "invalid",
+					severity: "error",
+					message: `${path}: card \`${card}\` is not in the bundle`,
 				});
 			}
 		}
@@ -113,12 +146,31 @@ export async function loadBundle(dir: string): Promise<Bundle> {
 	for (const path of walk(dir, "components").filter((p) => p.endsWith(".md"))) {
 		const data = await read(path);
 		if (!data) continue;
-		cards.push({
-			component: String(data.component ?? ""),
-			impl: String(data.impl ?? ""),
-			status: String(data.status ?? ""),
-			fingerprints: strs(data.fingerprints),
-		});
+		const ref = cardRef(path);
+		if (!ref) {
+			findings.push({
+				rule: "invalid",
+				severity: "error",
+				message: `${path}: a card lives at \`components/<Type>/<name>.md\``,
+			});
+			continue;
+		}
+		const capabilities = new Map<string, CapabilityLevel>();
+		for (const [cap, level] of Object.entries(isObj(data.capabilities) ? data.capabilities : {})) {
+			if (LEVELS.includes(level as CapabilityLevel))
+				capabilities.set(cap, level as CapabilityLevel);
+			else
+				findings.push({
+					rule: "invalid",
+					severity: "error",
+					message: `${path}: capability \`${cap}\` must be native, emulated or missing`,
+				});
+		}
+		cards.push({ path, ...ref, capabilities, fingerprints: strs(data.fingerprints) });
 	}
 	return { dir, annotations, cards, findings };
 }
+
+/** What each card of a bundle declares, in the shape `loadStack` takes. */
+export const capabilitiesOf = (bundle: Bundle): Map<string, Map<string, CapabilityLevel>> =>
+	new Map(bundle.cards.map((card) => [card.path, card.capabilities]));

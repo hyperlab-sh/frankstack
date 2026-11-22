@@ -28,16 +28,16 @@ with every claim linked to the file and line that shows it. It will be served at
 ## How it is meant to work
 
 1. **Pick blocks.** A block is a skill, playbook, agent, hook or step from a published stack.
-2. **Pick one implementation per component.** Blocks depend on shared things: where tasks are
-   stored, where learnings are kept, how control passes to the next block. You choose each once for
-   the whole stack, and it need not be the one a block was written for.
+2. **Pick one component per type.** Blocks depend on shared conventions: where tasks are stored,
+   where learnings are kept, how control passes to the next block. You choose each once for the
+   whole stack, and it need not be the one a block was written for.
 3. **Get a bundle.** Frankstack describes, for every block, each place it touches a component, what
    it reads and writes, and where it can loop back.
 4. **Your agent assembles it.** It rewrites the original blocks to your choices and installs the
    result. From then on the stack is yours to change.
 5. **Check it.** Before and after assembly, Frankstack walks every path through the stack and
    reports, with the path, any step that reads something no earlier step wrote, any loop with no
-   bound, any outcome that leads nowhere, and any leftover of a replaced implementation.
+   bound, any outcome that leads nowhere, and any leftover of a component the stack does not use.
 
 Frankstack does not run your loop, and it does not judge how well a stack performs. It makes stacks
 cheap to compose so you can try them.

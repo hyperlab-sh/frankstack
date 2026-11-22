@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { analyze } from "../src/analyze.ts";
 import { checkAssembled } from "../src/assembled.ts";
-import { loadBundle } from "../src/bundle.ts";
+import { capabilitiesOf, loadBundle } from "../src/bundle.ts";
 import { loadStack } from "../src/load.ts";
 import type { Finding } from "../src/types.ts";
 
@@ -14,7 +14,7 @@ start: plan
 ends: [done, escalated]
 inputs: [request]
 components:
-  TaskStorage: { impl: tasks-md, replaces: [beads], capabilities: { claim: native } }
+  TaskStorage: components/TaskStorage/tasks-md.md
 blocks:
   home/lead: { kind: skill, as: loop, role: router }
   home/plan: { kind: skill, as: plan }
@@ -51,31 +51,29 @@ const PLAN_SOURCE = [
 ].join("\n");
 const files: Record<string, string> = {
 	"stack.yaml": STACK,
-	"sources/home/lead.md": "---\nname: lead\ndescription: Lead\n---\n# Lead\n",
-	"sources/home/plan.md": PLAN_SOURCE,
-	"sources/away/review.md": "# Review\nAnswer pass or fail.\n",
-	"sources/away/brief.md": "# Brief\nBuild it.\n",
-	"blocks/home/lead.md":
-		"---\nblock: home/lead\nkind: skill\nfiles: [sources/home/lead.md]\noutcomes: []\n---\n",
-	"blocks/home/plan.md": [
+	"blocks/home/lead.md": "---\nname: lead\ndescription: Lead\n---\n# Lead\n",
+	"blocks/home/plan.md": PLAN_SOURCE,
+	"blocks/away/review.md": "# Review\nAnswer pass or fail.\n",
+	"blocks/away/brief.md": "# Brief\nBuild it.\n",
+	"annotations/home/lead.md":
+		"---\nblock: home/lead\nkind: skill\nfiles: [blocks/home/lead.md]\noutcomes: []\n---\n",
+	"annotations/home/plan.md": [
 		"---",
 		"block: home/plan",
 		"kind: skill",
-		"files: [sources/home/plan.md]",
+		"files: [blocks/home/plan.md]",
 		"outcomes: [done]",
 		"touches:",
-		'  - { component: TaskStorage, impl: beads, lines: "7", what: "Creates items: with bd." }',
+		'  - { component: components/TaskStorage/beads.md, lines: "7", what: "Creates items: with bd." }',
 		"---",
 		"",
 	].join("\n"),
-	"blocks/away/review.md":
-		"---\nblock: away/review\nkind: agent\nfiles: [sources/away/review.md]\noutcomes: [pass, fail]\n---\n",
-	"blocks/away/brief.md":
-		"---\nblock: away/brief\nkind: prompt\nfiles: [sources/away/brief.md]\noutcomes: [done]\n---\n",
-	"components/TaskStorage/tasks-md.md":
-		"---\ncomponent: TaskStorage\nimpl: tasks-md\nstatus: chosen\n---\n",
-	"components/TaskStorage/beads.md":
-		'---\ncomponent: TaskStorage\nimpl: beads\nstatus: replaced\nfingerprints: ["bd create", ".beads"]\n---\n',
+	"annotations/away/review.md":
+		"---\nblock: away/review\nkind: agent\nfiles: [blocks/away/review.md]\noutcomes: [pass, fail]\n---\n",
+	"annotations/away/brief.md":
+		"---\nblock: away/brief\nkind: prompt\nfiles: [blocks/away/brief.md]\noutcomes: [done]\n---\n",
+	"components/TaskStorage/tasks-md.md": "---\ncapabilities: { claim: native }\n---\n",
+	"components/TaskStorage/beads.md": '---\nfingerprints: ["bd create", ".beads"]\n---\n',
 };
 
 /** The plugin a careful assembler would write from the bundle above. */
@@ -92,10 +90,10 @@ const plugin: Record<string, string> = {
 	"agents/reviewer.md":
 		"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nAnswer pass or fail.\nEnd with `OUTCOME: pass` or `OUTCOME: fail`.\n",
 	"assembly.json": JSON.stringify({
-		"skills/loop/SKILL.md": { block: "home/lead", source: "sources/home/lead.md" },
-		"skills/loop/prompts/brief.md": { block: "away/brief", source: "sources/away/brief.md" },
-		"skills/plan/SKILL.md": { block: "home/plan", source: "sources/home/plan.md" },
-		"agents/reviewer.md": { block: "away/review", source: "sources/away/review.md" },
+		"skills/loop/SKILL.md": { block: "home/lead", source: "blocks/home/lead.md" },
+		"skills/loop/prompts/brief.md": { block: "away/brief", source: "blocks/away/brief.md" },
+		"skills/plan/SKILL.md": { block: "home/plan", source: "blocks/home/plan.md" },
+		"agents/reviewer.md": { block: "away/review", source: "blocks/away/review.md" },
 		".claude-plugin/plugin.json": "generated",
 	}),
 };
@@ -156,26 +154,64 @@ describe("bundle", () => {
 			),
 		).toEqual([]);
 	});
+	test("a key written twice in a frontmatter is an error", async () => {
+		const bundle = await loadBundle(
+			await bundleDir({
+				"annotations/away/brief.md":
+					'---\nblock: away/brief\nkind: prompt\nfiles: [blocks/away/brief.md]\noutcomes: [done]\nother:\n  - { lines: "1" }\nother:\n  - { lines: "2" }\n---\n',
+			}),
+		);
+		expect(bundle.findings.map((f) => f.message)).toEqual([
+			"annotations/away/brief.md: the key `other` is written twice",
+		]);
+	});
+	test("a touch that names a card the bundle does not have", async () => {
+		const bundle = await loadBundle(
+			await bundleDir({
+				"annotations/home/plan.md": (files["annotations/home/plan.md"] ?? "").replace(
+					"components/TaskStorage/beads.md",
+					"components/TaskStorage/linear.md",
+				),
+			}),
+		);
+		expect(bundle.findings.map((f) => f.message).join()).toContain(
+			"card `components/TaskStorage/linear.md` is not in the bundle",
+		);
+	});
+	test("the cards give the capabilities of the components", async () => {
+		const bundle = await loadBundle(await bundleDir());
+		expect(capabilitiesOf(bundle).get("components/TaskStorage/tasks-md.md")?.get("claim")).toBe(
+			"native",
+		);
+		const bad = await loadBundle(
+			await bundleDir({
+				"components/TaskStorage/tasks-md.md": "---\ncapabilities: { claim: partly }\n---\n",
+			}),
+		);
+		expect(bad.findings.map((f) => f.message).join()).toContain("`claim` must be native");
+	});
 	test("an annotation whose frontmatter is not YAML is reported with its file", async () => {
 		const bundle = await loadBundle(
-			await bundleDir({ "blocks/away/brief.md": "---\nblock: away/brief\nwhat: a: b: c\n---\n" }),
+			await bundleDir({
+				"annotations/away/brief.md": "---\nblock: away/brief\nwhat: a: b: c\n---\n",
+			}),
 		);
 		expect(bundle.findings).toHaveLength(1);
-		expect(bundle.findings[0]?.message).toContain("blocks/away/brief.md");
+		expect(bundle.findings[0]?.message).toContain("annotations/away/brief.md");
 	});
 	test("an annotation that names a source file the bundle does not have", async () => {
 		const bundle = await loadBundle(
 			await bundleDir({
-				"blocks/away/brief.md":
-					"---\nblock: away/brief\nkind: prompt\nfiles: [sources/away/missing.md]\noutcomes: [done]\n---\n",
+				"annotations/away/brief.md":
+					"---\nblock: away/brief\nkind: prompt\nfiles: [blocks/away/missing.md]\noutcomes: [done]\n---\n",
 			}),
 		);
-		expect(bundle.findings.map((f) => f.message).join()).toContain("sources/away/missing.md");
+		expect(bundle.findings.map((f) => f.message).join()).toContain("blocks/away/missing.md");
 	});
 	test("touch lines accept `n`, `n-m` and comma lists, and nothing else", async () => {
 		const withLines = (lines: string) =>
 			bundleDir({
-				"blocks/home/plan.md": (files["blocks/home/plan.md"] ?? "").replace(
+				"annotations/home/plan.md": (files["annotations/home/plan.md"] ?? "").replace(
 					'lines: "7"',
 					`lines: "${lines}"`,
 				),
@@ -194,7 +230,7 @@ describe("assembled plugin", () => {
 	test("a block that was never installed", async () => {
 		expect(rulesOf(await assembled({ "agents/reviewer.md": null }))).toContain("missing-block");
 	});
-	test("a leftover of the replaced implementation in a rewritten file is an error", async () => {
+	test("a leftover of a component the stack does not use is an error", async () => {
 		const findings = await assembled({
 			"skills/plan/SKILL.md": (plugin["skills/plan/SKILL.md"] ?? "").replace(
 				"Read the request.",
@@ -215,7 +251,7 @@ describe("assembled plugin", () => {
 		const extra = "\nNever commit the `.beads` folder.";
 		const findings = await assembled(
 			{ "skills/plan/SKILL.md": `${plugin["skills/plan/SKILL.md"]}${extra}` },
-			{ "sources/home/plan.md": `${PLAN_SOURCE}${extra}` },
+			{ "blocks/home/plan.md": `${PLAN_SOURCE}${extra}` },
 		);
 		expect(findings.filter((f) => f.severity === "error")).toEqual([]);
 		const hit = findings.find((f) => f.rule === "leftover");
@@ -231,7 +267,7 @@ describe("assembled plugin", () => {
 			.replace("Read the request.\n", "");
 		const findings = await assembled(
 			{ "skills/plan/SKILL.md": rewritten },
-			{ "sources/home/plan.md": `${PLAN_SOURCE}${extra}` },
+			{ "blocks/home/plan.md": `${PLAN_SOURCE}${extra}` },
 		);
 		expect(findings.filter((f) => f.rule === "leftover").map((f) => f.severity)).toEqual([
 			"warning",
@@ -249,7 +285,7 @@ describe("assembled plugin", () => {
 				"skills/loop/prompts/brief.md":
 					"# Brief\nBuild it.\nSee away:review.\nEnd with `OUTCOME: done`.\n",
 			},
-			{ "sources/away/brief.md": "# Brief\nBuild it.\nSee away:review.\n" },
+			{ "blocks/away/brief.md": "# Brief\nBuild it.\nSee away:review.\n" },
 		);
 		expect(findings.find((f) => f.rule === "home-reference")?.severity).toBe("warning");
 	});
@@ -259,15 +295,15 @@ describe("assembled plugin", () => {
 		const output =
 			"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nSee the plan skill.\nAnswer pass or fail.\nEnd with `OUTCOME: pass` or `OUTCOME: fail`.\n";
 		const annotation = (refers: string) =>
-			`---\nblock: away/review\nkind: agent\nfiles: [sources/away/review.md]\noutcomes: [pass, fail]\n${refers}---\n`;
+			`---\nblock: away/review\nkind: agent\nfiles: [blocks/away/review.md]\noutcomes: [pass, fail]\n${refers}---\n`;
 		const run = (refers: string) =>
 			assembled(
 				{ "agents/reviewer.md": output },
-				{ "sources/away/review.md": source, "blocks/away/review.md": annotation(refers) },
+				{ "blocks/away/review.md": source, "annotations/away/review.md": annotation(refers) },
 			);
 		expect(await run('refers:\n  - { name: planner, lines: "6" }\n')).toEqual([]);
 		expect((await run("")).map((f) => f.message)).toEqual([
-			"`agents/reviewer.md` changes lines of `sources/away/review.md` that no touch covers: 6",
+			"`agents/reviewer.md` changes lines of `blocks/away/review.md` that no touch covers: 6",
 		]);
 	});
 	test("one change across two touches a blank line apart is covered", async () => {
@@ -276,11 +312,11 @@ describe("assembled plugin", () => {
 		const output =
 			"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nRead the task and mark it done.\n\nAnswer pass or fail.\nEnd with `OUTCOME: pass` or `OUTCOME: fail`.\n";
 		const annotation = (lines: string[]) =>
-			`---\nblock: away/review\nkind: agent\nfiles: [sources/away/review.md]\noutcomes: [pass, fail]\nother:\n${lines.map((l) => `  - { lines: "${l}" }\n`).join("")}---\n`;
+			`---\nblock: away/review\nkind: agent\nfiles: [blocks/away/review.md]\noutcomes: [pass, fail]\nother:\n${lines.map((l) => `  - { lines: "${l}" }\n`).join("")}---\n`;
 		const run = (lines: string[]) =>
 			assembled(
 				{ "agents/reviewer.md": output },
-				{ "sources/away/review.md": source, "blocks/away/review.md": annotation(lines) },
+				{ "blocks/away/review.md": source, "annotations/away/review.md": annotation(lines) },
 			);
 		expect(await run(["6", "8"])).toEqual([]);
 		expect((await run(["6"])).map((f) => f.rule)).toEqual(["uncovered-change"]);
@@ -338,6 +374,37 @@ describe("assembled plugin", () => {
 				"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nAnswer pass or fail.\n",
 		});
 		expect(rulesOf(findings)).toContain("missing-outcome");
+	});
+	test("a level that runs inside a block needs its loop written in that block", async () => {
+		const leveled = STACK.replace(
+			"start: plan",
+			"levels: [task, step]\nstart: plan\ninside: { step: away/brief }",
+		)
+			.replace(
+				"  build:\n    block: away/brief\n    reads: [tasks]\n    writes: [code]\n    outcomes: { done: review }",
+				"  build:\n    block: away/brief\n    reads: [tasks]\n    writes: [code]\n    children: { done: review, escalated: escalated }\n    at:\n      step: { block: home/plan, reads: [tasks], outcomes: { done: done } }",
+			)
+			.replace("  plan:\n    block: home/plan", "  plan:\n    only: [task]\n    block: home/plan")
+			.replace(
+				"  review:\n    block: away/review",
+				"  review:\n    only: [task]\n    block: away/review",
+			);
+		const { flat, findings } = loadStack(leveled);
+		expect(findings.filter((f) => f.severity === "error")).toEqual([]);
+		if (!flat) throw new Error("the leveled fixture does not load");
+		const bundle = await loadBundle(await bundleDir());
+		const lead = `${plugin["skills/loop/SKILL.md"]}Levels: task, step.\n`;
+		const run = async (planSkill: string) =>
+			rulesOf(
+				await checkAssembled(
+					await pluginDir({ "skills/loop/SKILL.md": lead, "skills/plan/SKILL.md": planSkill }),
+					flat,
+					bundle,
+				),
+			);
+		const planSkill = plugin["skills/plan/SKILL.md"] ?? "";
+		expect(await run(planSkill)).toContain("missing-loop");
+		expect(await run(`${planSkill}\n## The step loop\n`)).not.toContain("missing-loop");
 	});
 	test("frontmatter without a name, and a missing assembly.json", async () => {
 		expect(
