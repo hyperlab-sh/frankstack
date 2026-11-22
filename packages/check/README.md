@@ -90,7 +90,7 @@ reported: the assembler writes it, and no check can tell whether it wrote it wel
 | `missing-source` | the clone does not have the commit the stack is pinned at |
 | `bad-header`, `wrong-block` | a block without `id` and `source`, from another repository or commit, or in a folder that is not its id's |
 | `source-mismatch` | a file that, without its marks, is not the file at the pinned commit |
-| `unknown-block` | a reference or a route to a block the stack does not have |
+| `unknown-block` | a reference or a route to a block the stack does not have, imported or listed under `pending`; a `pending` path the source does not have |
 | `unmarked-fingerprint` | a string that betrays one of the stack's providers, outside any mark that ties the passage to it |
 
 It also reports, for every block, what `bundle` reports about a block.

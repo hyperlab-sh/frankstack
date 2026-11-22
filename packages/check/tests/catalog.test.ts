@@ -328,6 +328,104 @@ describe("blocks a text points at", () => {
 	});
 });
 
+describe("blocks of the stack that are not imported yet", () => {
+	/** The stack without `execute`, and what `stack.yaml` says of the blocks still to import. */
+	const without = (pending: string, over: Over = {}) => {
+		const made = stack({ ...over, yaml: (yaml) => `${yaml}${pending}` });
+		rmSync(join(made.dir, "execute"), { recursive: true });
+		return { ...made, found: all(checkCatalog(made.dir, made.clone)) };
+	};
+	const unknown = (where: string) => [
+		"unknown-block",
+		`block \`alpha/plan\`: ${where} names \`alpha/execute\`, which is not a block of \`alpha\``,
+	];
+
+	test("a route to one is no finding", () => {
+		expect(without("pending:\n  execute: skills/execute\n").found).toEqual([]);
+	});
+
+	test("a reference to one is no finding", () => {
+		const plan = { text: (text: string) => swap(text, ROUTE, "Then use execute.") };
+		expect(without("pending:\n  execute: skills/execute\n", { plan }).found).toEqual([]);
+	});
+
+	test("its path is a folder or a file, however it is written", () => {
+		for (const path of ["skills/execute/", "./skills/execute", "skills/execute/SKILL.md"])
+			expect(without(`pending:\n  execute: ${path}\n`).found).toEqual([]);
+	});
+
+	test("a list with nothing in it changes nothing", () => {
+		const { found, dir } = without("pending: {}\n");
+		expect(found).toEqual([
+			unknown(`\`fs:route\` at SKILL.md:${lineOf(held(dir, "plan/SKILL.md"), "<fs:route")}`),
+		]);
+	});
+
+	test("only a block of this stack is looked up in the list", () => {
+		const text = (text: string) => text.replaceAll('to="alpha/execute"', 'to="beta/execute"');
+		const header = (header: string) => swap(header, "alpha/execute:", "beta/execute:");
+		const { found, dir } = without("pending:\n  execute: skills/execute\n", {
+			plan: { text, header },
+		});
+		expect(found).toEqual([
+			[
+				"unknown-block",
+				`block \`alpha/plan\`: \`fs:route\` at SKILL.md:${lineOf(held(dir, "plan/SKILL.md"), "<fs:route")} names \`beta/execute\`, which is not a block of \`alpha\``,
+			],
+		]);
+	});
+
+	test("the list is a mapping", () => {
+		for (const pending of ["pending: execute\n", "pending:\n  - execute\n", "pending: null\n"]) {
+			const { found, dir } = without(pending);
+			expect(found).toEqual([
+				[
+					"invalid",
+					"`stack.yaml`: `pending` must map each block that is not imported yet to its path in the repository",
+				],
+				unknown(`\`fs:route\` at SKILL.md:${lineOf(held(dir, "plan/SKILL.md"), "<fs:route")}`),
+			]);
+		}
+	});
+
+	test("each entry gives a path", () => {
+		for (const path of ["3", "''", "null", "[skills/execute]"])
+			expect(without(`pending:\n  execute: ${path}\n`).found).toEqual([
+				["invalid", "`stack.yaml`: `pending.execute` must be the block's path in the repository"],
+			]);
+	});
+
+	test("a path the source does not have", () => {
+		const { found, short } = without("pending:\n  execute: skills/run\n");
+		expect(found).toHaveLength(1);
+		expect(found[0]?.[0]).toBe("unknown-block");
+		expect(found[0]?.[1]).toStartWith(
+			"`stack.yaml`: `pending.execute` is `skills/run`, and the source has no such path at `",
+		);
+		expect(found[0]?.[1]).toContain(short);
+	});
+
+	test("a block that is imported is not in the list", () => {
+		expect(check({ yaml: (yaml) => `${yaml}pending:\n  execute: skills/execute\n` }).found).toEqual(
+			[
+				[
+					"invalid",
+					"`stack.yaml`: `pending` lists `execute`, which is imported: take it out of the list",
+				],
+			],
+		);
+	});
+
+	test("without the commit the paths are not looked up", () => {
+		const { dir } = stack({
+			yaml: (yaml) => `${yaml}pending:\n  execute: skills/run\n`,
+		});
+		rmSync(join(dir, "execute"), { recursive: true });
+		const found = all(checkCatalog(dir, temp()));
+		expect(found.map(([rule]) => rule)).toEqual(["missing-source"]);
+	});
+});
+
 describe("what betrays a provider of the stack", () => {
 	const betrays = (id: string, where: string) => [
 		"unmarked-fingerprint",

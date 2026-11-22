@@ -20,14 +20,21 @@ catalog/<stack>/IMPORT-REPORT.md  what the import added to the language and what
 catalog/<stack>/<block>/...     the files of one block, with marks; the header is in the main file
 ```
 
-`stack.yaml` has four keys, all required:
+`stack.yaml` has four required keys, and `pending` when the stack is not imported whole:
 
 ```yaml
 repository: obra/superpowers
 commit: "22f0b46…"        # in quotes: a commit of digits only is a number otherwise
 licence: MIT
 imported: 2026-11-22
+pending:                  # blocks that are not imported yet: the name of each, and where it is
+  writing-skills: skills/writing-skills
 ```
+
+- A stack may be imported in part. A block that an imported text references or routes to, and
+  that is not imported, is listed under `pending` with its path in the repository: its folder,
+  or the file itself. The reference keeps its mark and its id, `<stack>/<name>`. When the block
+  is imported it leaves the list.
 
 - The catalog holds every file of every block, complete, with marks. Without the marks a file is
   the stack's file byte for byte.
@@ -48,7 +55,9 @@ imported: 2026-11-22
 1. **Pin.** Record the repository and the commit. Copy the licence.
 2. **Split.** Every piece the stack installs becomes a block: a skill, an agent, a prompt, a
    script, a hook, a playbook, a resource. A file several blocks use is a block of its own. Every file of the
-   stack ends up in one block or is listed as left out, with the reason.
+   stack ends up in one block or is listed as left out, with the reason. When only some blocks
+   are imported, the blocks their text points at go under `pending` in `stack.yaml`, and the
+   report says that the import is partial.
 3. **Mark.** For each block, write the header and put the marks into the text
    (`docs/format.md`, "A block's files"): what it references, which concepts it uses and with
    which verbs, where it passes control, what it reads and writes, how it can end. The stack's
@@ -59,6 +68,10 @@ imported: 2026-11-22
      and marks the text with it;
    - not certain: it adds nothing, marks the passage with `purpose` (one sentence on what the
      passage is there for) and proposes the concept in the report.
+   When several stacks are imported at once, whoever marks one stack does not change the
+   language: they mark such a passage with `purpose` and say in the report whether they are
+   certain. A term is added after every stack is marked, when it shows in more than one stack or
+   its place in the language is clear, and the passages are marked again.
    What the block counts on outside any concept (git is installed) is listed under `assumes`.
 4. **Providers.** Where the stack has a piece of its own for a concept (a skill for its task
    tool, a script), that block gets `provides`: one sentence per verb, and its name for each
@@ -70,7 +83,8 @@ imported: 2026-11-22
    `stack.yaml`, `LICENSE` and `IMPORT-REPORT.md`; every block's header names its folder, the
    stack's repository and the pinned commit; each file without its marks is the file at that
    commit; every tag is closed and known; what the header declares and what the marks use agree;
-   every reference and every `to` of a route is a block of the stack; every term is in the
+   every reference and every `to` of a route is a block of the stack, imported or listed under
+   `pending` at a path the source has; every term is in the
    language; no fingerprint of one of the stack's providers is left outside a mark that ties the
    passage to it (`fs:uses` of that concept, `fs:concept` of the concept or of a name it owns,
    `fs:ref` to the provider).
@@ -108,7 +122,7 @@ Each step names who gives the information. Today every step is done by hand.
 
 ## What is not known yet
 
-- No stack has been imported whole. The twelve blocks of the first test bundle were mapped by
+- No stack has been imported whole, and `pending` has not been used on a real stack. The twelve blocks of the first test bundle were mapped by
   hand, under format v1. In those maps 62 uses of `TaskStorage`, `Memory`, `Decisions`,
   `Requirement` and `Executor` name no verb, and 48 of them, in 8 of the 12 blocks, were written
   for a provider that bundle does not use. Read one by one, about 13 of the 48 are a stack's
