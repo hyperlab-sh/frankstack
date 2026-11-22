@@ -1,6 +1,6 @@
 {
 	"name": "@frankstack/check",
-	"description": "Walks every path through a stack definition and reports where it cannot run its course",
+	"description": "Checks a bundle, the assembly an agent wrote from it, and a stack of the catalog against its source",
 	"version": "0.0.0",
 	"private": true,
 	"license": "MIT",

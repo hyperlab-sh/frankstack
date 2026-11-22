@@ -1,438 +1,766 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { analyze } from "../src/analyze.ts";
-import { checkAssembled } from "../src/assembled.ts";
-import { capabilitiesOf, loadBundle } from "../src/bundle.ts";
-import { loadStack } from "../src/load.ts";
+import { describe, expect, test } from "bun:test";
+import { keeps, loadBundle, repeated, usesOf } from "../src/bundle.ts";
 import type { Finding } from "../src/types.ts";
+import { BLOCKS, BUNDLE, block, bundle, one, remade, rules, swap, temp } from "./fixture.ts";
 
-const STACK = `
-name: mini
-start: plan
-ends: [done, escalated]
-inputs: [request]
-components:
-  TaskStorage: components/TaskStorage/tasks-md.md
+type Over = Parameters<typeof bundle>[0];
+const load = (over?: Over) => loadBundle(bundle(over));
+const found = (over?: Over) => load(over).findings;
+const said = (findings: Finding[], rule: string) =>
+	findings.filter((finding) => finding.rule === rule).map((finding) => finding.message);
+/** The sound bundle with one piece of its yaml replaced. */
+const yaml = (from: string, to: string) => ({ yaml: swap(BUNDLE, from, to) });
+
+const HOOK = block("kind: hook\ndoes: Stops a risky command.", {
+	"guard.sh": "#!/bin/sh\nexit 0\n",
+});
+const SMALL = `name: demo
+description: Two blocks and no flow.
+target: claude-code-plugin
 blocks:
-  home/lead: { kind: skill, as: loop, role: router }
-  home/plan: { kind: skill, as: plan }
-  away/review: { kind: agent, as: reviewer }
-  away/brief: { kind: prompt, as: brief }
-steps:
-  plan:
-    block: home/plan
-    reads: [request]
-    writes: [tasks]
-    outcomes: { done: build }
-  build:
-    block: away/brief
-    reads: [tasks]
-    writes: [code]
-    outcomes: { done: review }
-  review:
-    block: away/review
-    reads: [code]
-    outcomes:
-      pass: done
-      fail: { to: build, max: 2, then: escalated }
+  tasks: { from: beta/tasks }
+  review: { origin: imported }
 `;
+const small = { plan: undefined, execute: undefined, router: undefined };
 
-const PLAN_SOURCE = [
-	"---",
-	"name: plan",
-	"description: Plan the work",
-	"---",
-	"# Plan",
-	"Read the request.",
-	"Create one item per task with `bd create`.",
-	"Report done.",
-].join("\n");
-const files: Record<string, string> = {
-	"stack.yaml": STACK,
-	"blocks/home/lead.md": "---\nname: lead\ndescription: Lead\n---\n# Lead\n",
-	"blocks/home/plan.md": PLAN_SOURCE,
-	"blocks/away/review.md": "# Review\nAnswer pass or fail.\n",
-	"blocks/away/brief.md": "# Brief\nBuild it.\n",
-	"annotations/home/lead.md":
-		"---\nblock: home/lead\nkind: skill\nfiles: [blocks/home/lead.md]\noutcomes: []\n---\n",
-	"annotations/home/plan.md": [
-		"---",
-		"block: home/plan",
-		"kind: skill",
-		"files: [blocks/home/plan.md]",
-		"outcomes: [done]",
-		"touches:",
-		'  - { component: components/TaskStorage/beads.md, lines: "7", what: "Creates items: with bd." }',
-		"---",
-		"",
-	].join("\n"),
-	"annotations/away/review.md":
-		"---\nblock: away/review\nkind: agent\nfiles: [blocks/away/review.md]\noutcomes: [pass, fail]\n---\n",
-	"annotations/away/brief.md":
-		"---\nblock: away/brief\nkind: prompt\nfiles: [blocks/away/brief.md]\noutcomes: [done]\n---\n",
-	"components/TaskStorage/tasks-md.md": "---\ncapabilities: { claim: native }\n---\n",
-	"components/TaskStorage/beads.md": '---\nfingerprints: ["bd create", ".beads"]\n---\n',
-};
-
-/** The plugin a careful assembler would write from the bundle above. */
-const plugin: Record<string, string> = {
-	".claude-plugin/plugin.json": JSON.stringify({ name: "mini", version: "0.1.0" }),
-	"skills/loop/SKILL.md":
-		"---\nname: loop\ndescription: Run the mini loop\n---\n# Loop\nSteps: plan, then the brief prompt at `$" +
-		"{CLAUDE_PLUGIN_ROOT}/skills/loop/prompts/brief.md`, then the reviewer agent.\n",
-	"skills/loop/prompts/brief.md": "# Brief\nBuild it.\nEnd with `OUTCOME: done`.\n",
-	"skills/plan/SKILL.md": PLAN_SOURCE.replace(
-		"Create one item per task with `bd create`.",
-		"Add one `## T-n` section per task to tasks.md.",
-	).replace("Report done.", "End with `OUTCOME: done`."),
-	"agents/reviewer.md":
-		"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nAnswer pass or fail.\nEnd with `OUTCOME: pass` or `OUTCOME: fail`.\n",
-	"assembly.json": JSON.stringify({
-		"skills/loop/SKILL.md": { block: "home/lead", source: "blocks/home/lead.md" },
-		"skills/loop/prompts/brief.md": { block: "away/brief", source: "blocks/away/brief.md" },
-		"skills/plan/SKILL.md": { block: "home/plan", source: "blocks/home/plan.md" },
-		"agents/reviewer.md": { block: "away/review", source: "blocks/away/review.md" },
-		".claude-plugin/plugin.json": "generated",
-	}),
-};
-
-let root = "";
-const write = async (dir: string, tree: Record<string, string>) => {
-	for (const [path, text] of Object.entries(tree)) {
-		await mkdir(join(dir, path, ".."), { recursive: true });
-		await Bun.write(join(dir, path), text);
-	}
-	return dir;
-};
-let count = 0;
-const bundleDir = (change: Record<string, string> = {}) =>
-	write(join(root, `bundle-${count++}`), { ...files, ...change });
-/** A plugin with some files changed; `null` leaves a file out. */
-const pluginDir = (change: Record<string, string | null> = {}) => {
-	const tree = Object.fromEntries(
-		Object.entries({ ...plugin, ...change }).filter(
-			(entry): entry is [string, string] => entry[1] !== null,
-		),
-	);
-	return write(join(root, `plugin-${count++}`), tree);
-};
-const assembled = async (
-	change: Record<string, string | null> = {},
-	bundleChange: Record<string, string> = {},
-): Promise<Finding[]> => {
-	const bundle = await loadBundle(await bundleDir(bundleChange));
-	const { flat } = loadStack(STACK);
-	if (!flat) throw new Error("the fixture stack does not load");
-	return checkAssembled(await pluginDir(change), flat, bundle);
-};
-const rulesOf = (findings: Finding[], severity = "error") =>
-	findings.filter((f) => f.severity === severity).map((f) => f.rule);
-
-beforeAll(async () => {
-	root = await mkdtemp(join(tmpdir(), "frankstack-check-"));
-});
-afterAll(async () => {
-	await rm(root, { recursive: true, force: true });
-});
-
-describe("bundle", () => {
-	test("a complete bundle loads and passes", async () => {
-		const bundle = await loadBundle(await bundleDir());
-		expect(bundle.findings).toEqual([]);
-		expect([...bundle.annotations.keys()].sort()).toEqual([
-			"away/brief",
-			"away/review",
-			"home/lead",
-			"home/plan",
+describe("a sound bundle", () => {
+	test("has no finding", () => {
+		const { bundle: read, findings } = load();
+		expect(findings).toEqual([]);
+		expect(read?.name).toBe("demo");
+		expect(read?.target).toBe("claude-code-plugin");
+		expect([...(read?.blocks.keys() ?? [])]).toEqual([
+			"plan",
+			"execute",
+			"tasks",
+			"review",
+			"router",
+			"lead",
 		]);
-		const { flat, findings } = loadStack(STACK);
+		expect(read?.blocks.get("plan")?.origin).toBe("catalog");
+		expect(read?.blocks.get("review")?.origin).toBe("imported");
+		expect(read?.blocks.get("lead")?.origin).toBe("created");
+		expect(read?.blocks.get("lead")?.loaded).toBeUndefined();
+		expect(read?.blocks.get("lead")?.def?.kind).toBe("skill");
+		expect([...(read?.concepts ?? [])]).toEqual([
+			["TaskStorage", { block: "tasks" }],
+			["Routing", { block: "router" }],
+		]);
+		expect(read?.flows.map((flow) => flow.name)).toEqual(["ship"]);
+	});
+
+	test("with no flow needs no routing and no lead", () => {
+		expect(found({ yaml: SMALL, blocks: small })).toEqual([]);
+	});
+
+	test("a text that passes control relies on routing, whatever its header says", () => {
+		const read = load().bundle;
+		const plan = read?.blocks.get("plan");
+		expect(plan && [...usesOf(plan).keys()]).toEqual(["TaskStorage", "Routing"]);
+		expect(plan && usesOf(plan).get("Routing")?.writtenFor).toBe("alpha");
+		const execute = read?.blocks.get("execute");
+		expect(execute && [...usesOf(execute).keys()]).toEqual(["TaskStorage"]);
+	});
+
+	test("keeps a text only when the provider it was written for is the one chosen", () => {
+		const read = load().bundle;
+		if (!read) throw new Error("no bundle");
+		expect(keeps(read, "TaskStorage", "alpha")).toBe(false);
+		expect(keeps(read, "TaskStorage", "beta/tasks")).toBe(true);
+		expect(keeps(read, "TaskStorage", undefined)).toBe(false);
+		expect(keeps(read, "Memory", "alpha")).toBe(true);
+		const asWritten = load(yaml("TaskStorage: tasks", "TaskStorage: { as-written: alpha }")).bundle;
+		expect(asWritten && keeps(asWritten, "TaskStorage", "alpha")).toBe(true);
+	});
+});
+
+describe("bundle.yaml itself", () => {
+	test("is missing", () => {
+		const { bundle: read, findings } = loadBundle(temp());
+		expect(read).toBeUndefined();
+		expect(findings.map((finding) => finding.message)).toEqual(["`bundle.yaml` is missing"]);
+	});
+
+	test("is not YAML, or not a mapping", () => {
+		const broken = load({ yaml: "name: [demo\n" });
+		expect(broken.bundle).toBeUndefined();
+		expect(one(broken.findings, "invalid").message).toStartWith(
+			"`bundle.yaml` is not valid YAML: ",
+		);
+		expect(found({ yaml: "- demo\n" }).map((finding) => finding.message)).toEqual([
+			"`bundle.yaml` must be a mapping",
+		]);
+	});
+
+	test("has a key the format does not have", () => {
+		expect(said(found({ yaml: `${BUNDLE}stacks: {}\n` }), "invalid")).toEqual([
+			"unknown key `stacks`",
+		]);
+	});
+
+	test("has no name, description or target", () => {
+		const head =
+			"name: demo\ndescription: From a design to a reviewed change.\ntarget: claude-code-plugin\n";
+		expect(found(yaml(head, "")).map((finding) => finding.message)).toEqual([
+			"`name` is missing",
+			"`description` is missing",
+			"`target` is missing",
+		]);
+	});
+
+	test("names a target that does not exist", () => {
+		expect(found(yaml("target: claude-code-plugin", "target: cursor"))).toEqual([
+			{
+				rule: "invalid",
+				severity: "error",
+				message: "`target`: `cursor` is not a target (claude-code-plugin)",
+			},
+		]);
+	});
+
+	test("has no blocks", () => {
+		const findings = found({
+			yaml: "name: demo\ndescription: Nothing.\ntarget: claude-code-plugin\n",
+		});
+		expect(said(findings, "invalid")).toEqual(["`blocks` is missing or empty"]);
+	});
+});
+
+describe("the blocks of a bundle", () => {
+	test("a listed block with no folder", () => {
+		const findings = found({ blocks: { review: undefined } });
+		expect(said(findings, "no-folder")).toEqual(["block `review`: `blocks/review/` is missing"]);
+	});
+
+	test("a folder that belongs to no block", () => {
+		expect(found({ blocks: { extra: BLOCKS.review } })).toEqual([
+			{
+				rule: "unlisted-folder",
+				severity: "error",
+				message: "`blocks/extra` belongs to no block of `bundle.yaml`",
+			},
+		]);
+	});
+
+	test("a folder for a block the assembler creates", () => {
+		expect(found({ blocks: { lead: { "SKILL.md": "Lead.\n" } } }).map((f) => f.message)).toEqual([
+			"block `lead`: `blocks/lead/` exists; the assembler creates this block, so the bundle holds no file of it",
+		]);
+	});
+
+	test("a folder that holds another block than `from` says", () => {
+		expect(found(yaml("execute: { from: alpha/execute }", "execute: { from: alpha/run }"))).toEqual(
+			[
+				{
+					rule: "wrong-block",
+					severity: "error",
+					message:
+						"block `execute`: `blocks/execute/` holds `alpha/execute`, and `from` says `alpha/run`",
+				},
+			],
+		);
 		expect(
-			[...findings, ...(flat ? analyze(flat, bundle.annotations) : [])].filter(
-				(f) => f.severity === "error",
+			said(
+				found(yaml("review: { origin: imported }", "review: { from: alpha/review }")),
+				"wrong-block",
 			),
-		).toEqual([]);
-	});
-	test("a key written twice in a frontmatter is an error", async () => {
-		const bundle = await loadBundle(
-			await bundleDir({
-				"annotations/away/brief.md":
-					'---\nblock: away/brief\nkind: prompt\nfiles: [blocks/away/brief.md]\noutcomes: [done]\nother:\n  - { lines: "1" }\nother:\n  - { lines: "2" }\n---\n',
-			}),
-		);
-		expect(bundle.findings.map((f) => f.message)).toEqual([
-			"annotations/away/brief.md: the key `other` is written twice",
+		).toEqual([
+			"block `review`: `blocks/review/` holds a block with no `id`, and `from` says `alpha/review`",
 		]);
 	});
-	test("a touch that names a card the bundle does not have", async () => {
-		const bundle = await loadBundle(
-			await bundleDir({
-				"annotations/home/plan.md": (files["annotations/home/plan.md"] ?? "").replace(
-					"components/TaskStorage/beads.md",
-					"components/TaskStorage/linear.md",
+
+	test("a block of a stack listed as imported", () => {
+		expect(
+			found(yaml("execute: { from: alpha/execute }", "execute: { origin: imported }")).map(
+				(finding) => finding.message,
+			),
+		).toEqual(["block `execute`: an imported block has no `id` and no `source` in its header"]);
+	});
+
+	test("a block listed twice", () => {
+		const findings = found(
+			yaml(
+				"  review: { origin: imported }\n",
+				"  review: { from: alpha/review }\n  review: { origin: imported }\n",
+			),
+		);
+		expect(findings).toEqual([
+			{
+				rule: "duplicate-block",
+				severity: "error",
+				message: "`blocks` lists `review` twice; a bundle has one block per name",
+			},
+		]);
+	});
+
+	test("what is wrong inside a block's folder is reported with the block's name", () => {
+		const files = { ...BLOCKS.plan };
+		files["SKILL.md"] = swap(files["SKILL.md"] ?? "", "one sitting", "two sittings");
+		const finding = one(found({ blocks: { plan: files } }), "hash-mismatch");
+		expect(finding.message).toStartWith("block `plan`: `SKILL.md` without its marks is not");
+	});
+
+	test("an entry that is not written as the format says", () => {
+		expect(
+			said(found(yaml("review: { origin: imported }", "review: imported")), "invalid"),
+		).toEqual(["block `review`: must be a mapping"]);
+		expect(
+			said(
+				found(yaml("tasks: { from: beta/tasks }", "tasks: { from: beta/tasks, version: 2 }")),
+				"invalid",
+			),
+		).toEqual(["block `tasks`: unknown key `version`"]);
+		expect(
+			said(
+				found(yaml("tasks: { from: beta/tasks }", "tasks: { from: beta/tasks, origin: imported }")),
+				"invalid",
+			),
+		).toEqual([
+			"block `tasks`: `from` and `origin` do not go together: `origin` is for a block with no `from`",
+		]);
+		expect(
+			said(
+				found(yaml("tasks: { from: beta/tasks }", "tasks: { from: beta/tasks, kind: skill }")),
+				"invalid",
+			),
+		).toEqual([
+			"block `tasks`: `kind` is for a created block; this block's definition is the header of its main file",
+		]);
+	});
+
+	test("an entry with no `from` and no known `origin` is not a block of the bundle", () => {
+		const findings = found(yaml("router: { origin: imported }", "router: { origin: vendored }"));
+		expect(said(findings, "invalid")).toEqual([
+			"block `router`: needs `from: <stack>/<block>`, or `origin: imported` or `created`",
+		]);
+		expect(said(findings, "unknown-block")).toEqual([
+			"`concepts.Routing`: `router` is not listed under `blocks`",
+		]);
+		expect(said(findings, "unlisted-folder")).toEqual([
+			"`blocks/router` belongs to no block of `bundle.yaml`",
+		]);
+	});
+
+	describe("a created block", () => {
+		const lead = "    kind: skill\n    does: Leads the ship flow.\n";
+
+		test("declares no references", () => {
+			expect(
+				found(yaml(lead, `${lead}    references: { alpha/plan: plan }\n`)).map((f) => f.message),
+			).toEqual(["block `lead`: a created block has no text yet, so it declares no `references`"]);
+		});
+
+		test("needs a kind and what it does", () => {
+			expect(found(yaml(lead, "")).map((finding) => [finding.rule, finding.message])).toEqual([
+				["invalid", "block `lead`: `kind` is missing"],
+				["invalid", "block `lead`: `does` is missing"],
+			]);
+		});
+
+		test("is defined in the terms of the language", () => {
+			expect(
+				found(yaml("    kind: skill\n    does: Leads", "    kind: wizard\n    does: Leads")).map(
+					(f) => [f.rule, f.message],
 				),
-			}),
-		);
-		expect(bundle.findings.map((f) => f.message).join()).toContain(
-			"card `components/TaskStorage/linear.md` is not in the bundle",
-		);
+			).toEqual([["unknown-term", "block `lead`: `wizard` is not a block kind"]]);
+		});
+
+		test("can use and provide concepts like any block", () => {
+			const store = `${lead}  store:\n    origin: created\n    kind: playbook\n    does: Keeps tasks in a file.\n    provides:\n      TaskStorage: { verbs: [create, mark-done], names: { Task: entry } }\n`;
+			const read = load({
+				yaml: swap(swap(BUNDLE, lead, store), "TaskStorage: tasks", "TaskStorage: store"),
+			});
+			expect(read.findings).toEqual([]);
+			const provides = read.bundle?.blocks.get("store")?.def?.provides.get("TaskStorage");
+			expect([...(provides?.verbs ?? [])]).toEqual([
+				["create", undefined],
+				["mark-done", undefined],
+			]);
+		});
 	});
-	test("the cards give the capabilities of the components", async () => {
-		const bundle = await loadBundle(await bundleDir());
-		expect(capabilitiesOf(bundle).get("components/TaskStorage/tasks-md.md")?.get("claim")).toBe(
-			"native",
-		);
-		const bad = await loadBundle(
-			await bundleDir({
-				"components/TaskStorage/tasks-md.md": "---\ncapabilities: { claim: partly }\n---\n",
-			}),
-		);
-		expect(bad.findings.map((f) => f.message).join()).toContain("`claim` must be native");
+});
+
+describe("references", () => {
+	const bound = "    references: { alpha/execute: execute }\n";
+
+	test("one the bundle does not bind", () => {
+		expect(found(yaml(bound, ""))).toEqual([
+			{
+				rule: "unbound-reference",
+				severity: "error",
+				message:
+					"block `plan`: its text names `alpha/execute`, and `references` has no entry for it",
+			},
+		]);
 	});
-	test("an annotation whose frontmatter is not YAML is reported with its file", async () => {
-		const bundle = await loadBundle(
-			await bundleDir({
-				"annotations/away/brief.md": "---\nblock: away/brief\nwhat: a: b: c\n---\n",
-			}),
-		);
-		expect(bundle.findings).toHaveLength(1);
-		expect(bundle.findings[0]?.message).toContain("annotations/away/brief.md");
+
+	test("one bound to null is fine when the block can do without it", () => {
+		expect(found(yaml(bound, "    references: { alpha/execute: null }\n"))).toEqual([]);
+		expect(found(yaml(bound, "    references: { alpha/execute: ~ }\n"))).toEqual([]);
 	});
-	test("an annotation that names a source file the bundle does not have", async () => {
-		const bundle = await loadBundle(
-			await bundleDir({
-				"annotations/away/brief.md":
-					"---\nblock: away/brief\nkind: prompt\nfiles: [blocks/away/missing.md]\noutcomes: [done]\n---\n",
-			}),
-		);
-		expect(bundle.findings.map((f) => f.message).join()).toContain("blocks/away/missing.md");
+
+	test("one bound to null that the block cannot do without", () => {
+		const plan = remade("plan", {
+			header: (header) => swap(header, "required: false", "required: true"),
+		});
+		expect(
+			found({ ...yaml(bound, "    references: { alpha/execute: null }\n"), blocks: { plan } }).map(
+				(finding) => [finding.rule, finding.message],
+			),
+		).toEqual([
+			[
+				"required-reference",
+				"block `plan`: `alpha/execute` is bound to null, and the block cannot do without it",
+			],
+		]);
 	});
-	test("touch lines accept `n`, `n-m` and comma lists, and nothing else", async () => {
-		const withLines = (lines: string) =>
-			bundleDir({
-				"annotations/home/plan.md": (files["annotations/home/plan.md"] ?? "").replace(
-					'lines: "7"',
-					`lines: "${lines}"`,
+
+	test("one bound to a block the bundle does not list", () => {
+		expect(
+			found(yaml(bound, "    references: { alpha/execute: runner }\n")).map((f) => [
+				f.rule,
+				f.message,
+			]),
+		).toEqual([
+			[
+				"unknown-block",
+				"block `plan`: `references.alpha/execute` is `runner`, which is not listed under `blocks`",
+			],
+		]);
+	});
+
+	test("one bound to a block of another kind", () => {
+		expect(
+			found(yaml(bound, "    references: { alpha/execute: review }\n")).map((f) => [
+				f.rule,
+				f.message,
+			]),
+		).toEqual([
+			[
+				"wrong-kind",
+				"block `plan`: `alpha/execute` is of kind `skill`, and `review` is of kind `agent`",
+			],
+		]);
+	});
+
+	test("one bound to a created block of the same kind", () => {
+		expect(found(yaml(bound, "    references: { alpha/execute: lead }\n"))).toEqual([]);
+	});
+
+	test("an entry for a reference the block does not declare", () => {
+		expect(
+			found(yaml(bound, "    references: { alpha/execute: execute, alpha/other: review }\n")).map(
+				(f) => [f.rule, f.message],
+			),
+		).toEqual([
+			["invalid", "block `plan`: `references.alpha/other` is not a reference the block declares"],
+		]);
+	});
+
+	test("entries of the wrong shape", () => {
+		expect(found(yaml(bound, "    references: [execute]\n")).map((f) => f.message)).toEqual([
+			"block `plan`: `references` must be a mapping",
+			"block `plan`: its text names `alpha/execute`, and `references` has no entry for it",
+		]);
+		expect(
+			found(yaml(bound, "    references: { alpha/execute: 3 }\n")).map((f) => f.message),
+		).toEqual([
+			"block `plan`: `references.alpha/execute` must be a block of this bundle, or null",
+			"block `plan`: its text names `alpha/execute`, and `references` has no entry for it",
+		]);
+	});
+});
+
+describe("concepts", () => {
+	test("a concept blocks use and the bundle does not settle", () => {
+		expect(found(yaml("  TaskStorage: tasks\n", "")).map((f) => [f.rule, f.message])).toEqual([
+			["no-provider", "block `plan` uses `TaskStorage`, and `concepts` has no entry for it"],
+			["no-provider", "block `execute` uses `TaskStorage`, and `concepts` has no entry for it"],
+		]);
+	});
+
+	test("a provider the bundle does not list", () => {
+		expect(
+			found(yaml("TaskStorage: tasks", "TaskStorage: tickets")).map((f) => [f.rule, f.message]),
+		).toEqual([
+			["unknown-block", "`concepts.TaskStorage`: `tickets` is not listed under `blocks`"],
+		]);
+	});
+
+	test("a block that does not provide the concept", () => {
+		expect(
+			found(yaml("TaskStorage: tasks", "TaskStorage: review")).map((f) => [f.rule, f.message]),
+		).toEqual([
+			["not-a-provider", "`concepts.TaskStorage`: block `review` does not provide `TaskStorage`"],
+		]);
+	});
+
+	test("a concept the language does not have, and the harness", () => {
+		expect(
+			found(
+				yaml("  Routing: router\n", "  Routing: router\n  Storage: tasks\n  Harness: tasks\n"),
+			).map((f) => [f.rule, f.message]),
+		).toEqual([
+			["unknown-term", "`concepts`: `Storage` is not a concept a block provides"],
+			["invalid", "`concepts.Harness`: the target settles `Harness`; it has no entry"],
+		]);
+	});
+
+	test("an entry of the wrong shape", () => {
+		const message =
+			"`concepts.TaskStorage` must be a block of this bundle or `{ as-written: <stack> }`";
+		expect(said(found(yaml("TaskStorage: tasks", "TaskStorage: 3")), "invalid")).toEqual([message]);
+		expect(
+			said(
+				found(yaml("TaskStorage: tasks", "TaskStorage: { as-written: alpha, also: beta }")),
+				"invalid",
+			),
+		).toEqual([message]);
+	});
+
+	describe("as-written", () => {
+		test("keeps the text of blocks written for that stack", () => {
+			expect(found(yaml("TaskStorage: tasks", "TaskStorage: { as-written: alpha }"))).toEqual([]);
+		});
+
+		test("a block written for another stack", () => {
+			expect(
+				found(yaml("TaskStorage: tasks", "TaskStorage: { as-written: beta }")).map((f) => [
+					f.rule,
+					f.message,
+				]),
+			).toEqual([
+				[
+					"not-as-written",
+					"`concepts.TaskStorage` is `as-written: beta`, and block `plan` was written for `alpha`",
+				],
+				[
+					"not-as-written",
+					"`concepts.TaskStorage` is `as-written: beta`, and block `execute` was written for `alpha`",
+				],
+			]);
+		});
+
+		test("a block whose header names no stack", () => {
+			const execute = remade("execute", {
+				header: (header) =>
+					swap(header, "{ written-for: alpha, verbs: [mark-done] }", "{ verbs: [mark-done] }"),
+			});
+			expect(
+				found({
+					...yaml("TaskStorage: tasks", "TaskStorage: { as-written: alpha }"),
+					blocks: { execute },
+				}).map((f) => f.message),
+			).toEqual([
+				"`concepts.TaskStorage` is `as-written: alpha`, and block `execute` was written for no stack its header names",
+			]);
+		});
+
+		test("a block the assembler writes has no text to keep", () => {
+			const lead = "    does: Leads the ship flow.\n";
+			const findings = found({
+				yaml: swap(
+					swap(BUNDLE, "TaskStorage: tasks", "TaskStorage: { as-written: alpha }"),
+					lead,
+					`${lead}    uses: { TaskStorage: { verbs: [list] } }\n`,
 				),
 			});
-		for (const lines of ["7", "6-7", "2,6-7", "2, 7"])
-			expect((await loadBundle(await withLines(lines))).findings).toEqual([]);
-		for (const lines of ["seven", "7-", "7;8", ""])
-			expect((await loadBundle(await withLines(lines))).findings).toHaveLength(1);
+			expect(findings.map((f) => [f.rule, f.message])).toEqual([
+				[
+					"not-as-written",
+					"`concepts.TaskStorage` is `as-written: alpha`, and block `lead` is written by the assembler, which has no block that says how `alpha` does it",
+				],
+			]);
+		});
 	});
-});
 
-describe("assembled plugin", () => {
-	test("a faithful assembly passes", async () => {
-		expect(await assembled()).toEqual([]);
-	});
-	test("a block that was never installed", async () => {
-		expect(rulesOf(await assembled({ "agents/reviewer.md": null }))).toContain("missing-block");
-	});
-	test("a leftover of a component the stack does not use is an error", async () => {
-		const findings = await assembled({
-			"skills/plan/SKILL.md": (plugin["skills/plan/SKILL.md"] ?? "").replace(
-				"Read the request.",
-				"Read the request and run `bd create`.",
-			),
+	test("a verb the chosen provider has no sentence for", () => {
+		const tasks = remade("tasks", {
+			header: (header) =>
+				swap(header, '      mark-done: "Close the ticket with `tk close <id>`."\n', ""),
 		});
-		const hit = findings.find((f) => f.rule === "leftover");
-		expect(hit?.severity).toBe("error");
-		expect(hit?.message).toContain("bd create");
-	});
-	test("a touch left as the source wrote it is the assembler's miss", async () => {
-		const findings = await assembled({ "skills/plan/SKILL.md": PLAN_SOURCE });
-		const hit = findings.find((f) => f.rule === "leftover");
-		expect(hit?.severity).toBe("error");
-		expect(hit?.message).toContain("line 7");
-	});
-	test("a leftover on a source line no touch covers is the annotation's miss: a warning", async () => {
-		const extra = "\nNever commit the `.beads` folder.";
-		const findings = await assembled(
-			{ "skills/plan/SKILL.md": `${plugin["skills/plan/SKILL.md"]}${extra}` },
-			{ "blocks/home/plan.md": `${PLAN_SOURCE}${extra}` },
-		);
-		expect(findings.filter((f) => f.severity === "error")).toEqual([]);
-		const hit = findings.find((f) => f.rule === "leftover");
-		expect(hit?.severity).toBe("warning");
-		expect(hit?.message).toContain("line 9");
-		expect(hit?.message).toContain("covered by no touch");
-	});
-	test("lines are traced back to the source across earlier additions and removals", async () => {
-		// Two lines added above and one removed: the kept `.beads` line is still the source's line 9.
-		const extra = "\nNever commit the `.beads` folder.";
-		const rewritten = `${plugin["skills/plan/SKILL.md"]}${extra}`
-			.replace("# Plan", "# Plan\nA note.\nAnother note.")
-			.replace("Read the request.\n", "");
-		const findings = await assembled(
-			{ "skills/plan/SKILL.md": rewritten },
-			{ "blocks/home/plan.md": `${PLAN_SOURCE}${extra}` },
-		);
-		expect(findings.filter((f) => f.rule === "leftover").map((f) => f.severity)).toEqual([
-			"warning",
+		expect(found({ blocks: { tasks } }).map((f) => [f.rule, f.message])).toEqual([
+			[
+				"missing-verb",
+				"block `execute` does `TaskStorage.mark-done`, which `tasks` has no sentence for",
+			],
 		]);
 	});
-	test("a reference to the home stack on a line the assembler wrote is an error", async () => {
-		const findings = await assembled({
-			"skills/loop/prompts/brief.md": `${plugin["skills/loop/prompts/brief.md"]}Then use away:review.\n`,
+
+	test("a trait the chosen provider does not have", () => {
+		const review = remade("review", {
+			header: (header) => `${header}uses:\n  Decisions: { needs: [numbered] }\n`,
 		});
-		expect(findings.find((f) => f.rule === "home-reference")?.severity).toBe("error");
-	});
-	test("the same reference kept from the source is a warning", async () => {
-		const findings = await assembled(
-			{
-				"skills/loop/prompts/brief.md":
-					"# Brief\nBuild it.\nSee away:review.\nEnd with `OUTCOME: done`.\n",
-			},
-			{ "blocks/away/brief.md": "# Brief\nBuild it.\nSee away:review.\n" },
-		);
-		expect(findings.find((f) => f.rule === "home-reference")?.severity).toBe("warning");
-	});
-	test("a new frontmatter name and a change at a `refers` line are expected", async () => {
-		const source =
-			"---\nname: code-reviewer\ndescription: Review the diff\n---\n# Review\nSee the planner skill.\nAnswer pass or fail.\n";
-		const output =
-			"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nSee the plan skill.\nAnswer pass or fail.\nEnd with `OUTCOME: pass` or `OUTCOME: fail`.\n";
-		const annotation = (refers: string) =>
-			`---\nblock: away/review\nkind: agent\nfiles: [blocks/away/review.md]\noutcomes: [pass, fail]\n${refers}---\n`;
-		const run = (refers: string) =>
-			assembled(
-				{ "agents/reviewer.md": output },
-				{ "blocks/away/review.md": source, "annotations/away/review.md": annotation(refers) },
-			);
-		expect(await run('refers:\n  - { name: planner, lines: "6" }\n')).toEqual([]);
-		expect((await run("")).map((f) => f.message)).toEqual([
-			"`agents/reviewer.md` changes lines of `blocks/away/review.md` that no touch covers: 6",
-		]);
-	});
-	test("one change across two touches a blank line apart is covered", async () => {
-		const source =
-			"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nRead the bead.\n\nClose the bead.\n\nAnswer pass or fail.\n";
-		const output =
-			"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nRead the task and mark it done.\n\nAnswer pass or fail.\nEnd with `OUTCOME: pass` or `OUTCOME: fail`.\n";
-		const annotation = (lines: string[]) =>
-			`---\nblock: away/review\nkind: agent\nfiles: [blocks/away/review.md]\noutcomes: [pass, fail]\nother:\n${lines.map((l) => `  - { lines: "${l}" }\n`).join("")}---\n`;
-		const run = (lines: string[]) =>
-			assembled(
-				{ "agents/reviewer.md": output },
-				{ "blocks/away/review.md": source, "annotations/away/review.md": annotation(lines) },
-			);
-		expect(await run(["6", "8"])).toEqual([]);
-		expect((await run(["6"])).map((f) => f.rule)).toEqual(["uncovered-change"]);
-	});
-	test("a change outside the annotated lines is listed for review", async () => {
-		const findings = await assembled({
-			"skills/plan/SKILL.md": (plugin["skills/plan/SKILL.md"] ?? "").replace(
-				"# Plan",
-				"# Planning, rewritten",
-			),
-		});
-		expect(rulesOf(findings, "warning")).toContain("uncovered-change");
-		expect(rulesOf(findings)).toEqual([]);
-	});
-	test("a plugin path that resolves to nothing", async () => {
-		const findings = await assembled({
-			"skills/loop/SKILL.md": (plugin["skills/loop/SKILL.md"] ?? "").replace(
-				"prompts/brief.md",
-				"prompts/breif.md",
-			),
-		});
-		expect(rulesOf(findings)).toContain("unresolved-path");
-	});
-	test("an absolute path into the home directory", async () => {
-		const findings = await assembled({
-			"skills/loop/prompts/brief.md": `${plugin["skills/loop/prompts/brief.md"]}See /Users/someone/.claude/skills/x.md\n`,
-		});
-		expect(rulesOf(findings)).toContain("absolute-path");
-	});
-	test("a lead that never mentions one of the blocks", async () => {
-		const findings = await assembled({
-			"skills/loop/SKILL.md": (plugin["skills/loop/SKILL.md"] ?? "").replace(
-				"then the reviewer agent",
-				"then stop",
-			),
-		});
-		expect(rulesOf(findings)).toContain("unresolved-handoff");
-	});
-	test("the plugin's own skills and agents may be named with its prefix", async () => {
-		const lead = plugin["skills/loop/SKILL.md"] ?? "";
-		const named = await assembled({
-			"skills/loop/SKILL.md": `${lead}Invoke mini:plan, then start the agent mini:reviewer.\n`,
-		});
-		expect(named).toEqual([]);
-		const unknown = await assembled({
-			"skills/loop/SKILL.md": `${lead}Start the agent mini:nobody.\n`,
-		});
-		expect(unknown.map((f) => f.message)).toEqual([
-			`\`skills/loop/SKILL.md\` line ${lead.split("\n").length}: \`mini:nobody\` is not a skill or an agent of this plugin`,
-		]);
-	});
-	test("a block that never reports an outcome", async () => {
-		const findings = await assembled({
-			"agents/reviewer.md":
-				"---\nname: reviewer\ndescription: Review the diff\n---\n# Review\nAnswer pass or fail.\n",
-		});
-		expect(rulesOf(findings)).toContain("missing-outcome");
-	});
-	test("a level that runs inside a block needs its loop written in that block", async () => {
-		const leveled = STACK.replace(
-			"start: plan",
-			"levels: [task, step]\nstart: plan\ninside: { step: away/brief }",
-		)
-			.replace(
-				"  build:\n    block: away/brief\n    reads: [tasks]\n    writes: [code]\n    outcomes: { done: review }",
-				"  build:\n    block: away/brief\n    reads: [tasks]\n    writes: [code]\n    children: { done: review, escalated: escalated }\n    at:\n      step: { block: home/plan, reads: [tasks], outcomes: { done: done } }",
-			)
-			.replace("  plan:\n    block: home/plan", "  plan:\n    only: [task]\n    block: home/plan")
-			.replace(
-				"  review:\n    block: away/review",
-				"  review:\n    only: [task]\n    block: away/review",
-			);
-		const { flat, findings } = loadStack(leveled);
-		expect(findings.filter((f) => f.severity === "error")).toEqual([]);
-		if (!flat) throw new Error("the leveled fixture does not load");
-		const bundle = await loadBundle(await bundleDir());
-		const lead = `${plugin["skills/loop/SKILL.md"]}Levels: task, step.\n`;
-		const run = async (planSkill: string) =>
-			rulesOf(
-				await checkAssembled(
-					await pluginDir({ "skills/loop/SKILL.md": lead, "skills/plan/SKILL.md": planSkill }),
-					flat,
-					bundle,
-				),
-			);
-		const planSkill = plugin["skills/plan/SKILL.md"] ?? "";
-		expect(await run(planSkill)).toContain("missing-loop");
-		expect(await run(`${planSkill}\n## The step loop\n`)).not.toContain("missing-loop");
-	});
-	test("frontmatter without a name, and a missing assembly.json", async () => {
+		const provider = (traits: string) =>
+			remade("router", {
+				header: (header) =>
+					swap(
+						header,
+						"provides:\n",
+						`provides:\n  Decisions:\n    verbs: { read: "Read the log." }\n${traits}`,
+					),
+			});
+		const chosen = yaml("  Routing: router\n", "  Routing: router\n  Decisions: router\n");
 		expect(
-			rulesOf(await assembled({ "agents/reviewer.md": "# Review\n`OUTCOME: pass`\n" })),
-		).toContain("bad-frontmatter");
-		expect(rulesOf(await assembled({ "assembly.json": null }))).toContain("missing-file");
+			found({ ...chosen, blocks: { review, router: provider("") } }).map((f) => [
+				f.rule,
+				f.message,
+			]),
+		).toEqual([
+			["missing-trait", "block `review` needs `Decisions.numbered`, which `router` does not have"],
+		]);
+		expect(
+			found({ ...chosen, blocks: { review, router: provider("    traits: [numbered]\n") } }),
+		).toEqual([]);
+	});
+
+	test("a trait of the harness the target does not have", () => {
+		const review = remade("review", {
+			header: (header) => `${header}uses:\n  Harness: { needs: [subagents] }\n`,
+		});
+		expect(found({ blocks: { review } })).toEqual([]);
+		const findings = found({
+			...yaml("target: claude-code-plugin", "target: cursor"),
+			blocks: { review },
+		});
+		expect(said(findings, "missing-trait")).toEqual([
+			"block `review` needs `Harness.subagents`, which the target `cursor` does not have",
+		]);
+	});
+
+	test("a name the chosen provider does not give is a warning", () => {
+		const tasks = remade("tasks", {
+			header: (header) => swap(header, "    names: { Task: ticket }\n", ""),
+		});
+		expect(found({ blocks: { tasks } })).toEqual([
+			{
+				rule: "unnamed-concept",
+				severity: "warning",
+				message:
+					"block `plan` names `Task`, and `tasks` gives no name for it: the assembler writes the ordinary word",
+			},
+		]);
 	});
 });
 
-describe("command line", () => {
-	const cli = join(import.meta.dir, "../src/cli.ts");
-	const run = (...args: string[]) => {
-		const result = Bun.spawnSync(["bun", cli, ...args]);
-		return { code: result.exitCode, err: result.stderr.toString() };
-	};
-	test("a stack file that does not exist is a usage error, not a crash", () => {
-		const { code, err } = run("stack", "/nowhere/stack.yaml");
-		expect(code).toBe(64);
-		expect(err).toContain("/nowhere/stack.yaml: no such file");
+describe("routing", () => {
+	test("a bundle with a flow and no provider of routing", () => {
+		expect(found(yaml("  Routing: router\n", "")).map((f) => [f.rule, f.message])).toEqual([
+			["no-provider", "block `plan` uses `Routing`, and `concepts` has no entry for it"],
+			[
+				"no-routing",
+				"the bundle has a flow, and no block provides `Routing`: `concepts.Routing` must name the block that says how an outcome is reported",
+			],
+		]);
 	});
-	test("a bundle folder or plugin folder that does not exist is a usage error", () => {
-		expect(run("assembled", "/nowhere/plugin", "--bundle", "/nowhere/bundle")).toEqual({
-			code: 64,
-			err: "/nowhere/bundle/stack.yaml: no such file\n",
+
+	test("routing cannot stay as written when the bundle has a flow", () => {
+		expect(rules(found(yaml("Routing: router", "Routing: { as-written: alpha }")))).toEqual([
+			"no-routing",
+		]);
+	});
+
+	test("routing can stay as written when the bundle has no flow", () => {
+		const flows = BUNDLE.slice(BUNDLE.indexOf("flows:\n"));
+		expect(
+			found({
+				yaml: swap(swap(BUNDLE, flows, ""), "Routing: router", "Routing: { as-written: alpha }"),
+			}),
+		).toEqual([]);
+	});
+
+	test("a provider of routing with no sentence for reporting", () => {
+		const router = remade("router", {
+			header: (header) =>
+				swap(header, '    verbs:\n      report: "End with the line `OUTCOME: {outcome}`."\n', ""),
 		});
+		expect(found({ blocks: { router } }).map((f) => [f.rule, f.message])).toEqual([
+			["missing-verb", "`router` provides `Routing` and has no sentence for `report`"],
+		]);
 	});
-	test("`assembled` without a bundle prints the usage", () => {
-		expect(run("assembled", "/nowhere/plugin").code).toBe(64);
-		expect(run("assembled", "/nowhere/plugin", "--bundle").code).toBe(64);
+});
+
+describe("hooks", () => {
+	const hooks = (first: string, second: string) => ({
+		...yaml(
+			"  review: { origin: imported }\n",
+			`  review: { origin: imported }\n  guard: ${first}\n  watch: ${second}\n`,
+		),
+		blocks: { guard: HOOK, watch: HOOK },
+	});
+
+	test("two hooks on different events", () => {
+		expect(
+			found(hooks("{ origin: imported, event: PreToolUse }", "{ origin: imported, event: Stop }")),
+		).toEqual([]);
+	});
+
+	test("two hooks on one event", () => {
+		expect(
+			found(
+				hooks("{ origin: imported, event: PreToolUse }", "{ origin: imported, event: PreToolUse }"),
+			),
+		).toEqual([
+			{
+				rule: "hook-clash",
+				severity: "error",
+				message: "guard and watch both hook the event `PreToolUse`",
+			},
+		]);
+	});
+
+	test("a hook with no event, or one that is not a name", () => {
+		expect(
+			found(hooks("{ origin: imported }", "{ origin: imported, event: [Stop] }")).map((f) => [
+				f.rule,
+				f.message,
+			]),
+		).toEqual([
+			["invalid", "block `watch`: `event` must be the name of a hook event"],
+			["invalid", "block `guard`: a hook needs `event`"],
+			["invalid", "block `watch`: a hook needs `event`"],
+		]);
+	});
+
+	test("an event on a block that is not a hook", () => {
+		expect(
+			found(yaml("review: { origin: imported }", "review: { origin: imported, event: Stop }")).map(
+				(f) => f.message,
+			),
+		).toEqual(["block `review`: `event` is for a hook"]);
+	});
+});
+
+describe("the flows of a bundle", () => {
+	const ship = BUNDLE.slice(BUNDLE.indexOf("  ship:\n"));
+
+	test("a lead that is not a created block", () => {
+		expect(found(yaml("    lead: lead\n", "    lead: review\n"))).toEqual([
+			{
+				rule: "not-created",
+				severity: "error",
+				flow: "ship",
+				message:
+					"`lead` is `review`, which is not a created block; the assembler writes it from the flow",
+			},
+		]);
+	});
+
+	test("one block leading two flows", () => {
+		expect(found({ yaml: BUNDLE + ship.replace("  ship:\n", "  again:\n") })).toEqual([
+			{
+				rule: "two-flows",
+				severity: "error",
+				message: "block `lead` leads the flows ship and again; a block leads one",
+			},
+		]);
+	});
+
+	test("each flow with its own lead", () => {
+		const second =
+			"  second:\n    origin: created\n    kind: skill\n    does: Leads the other flow.\n";
+		const again = ship
+			.replace("  ship:\n", "  again:\n")
+			.replace("    lead: lead\n", "    lead: second\n");
+		expect(found({ yaml: swap(BUNDLE, "flows:\n", `${second}flows:\n`) + again })).toEqual([]);
+	});
+
+	test("a flow listed twice", () => {
+		expect(said(found({ yaml: BUNDLE + ship }), "invalid")).toEqual(["`flows` lists `ship` twice"]);
+	});
+
+	test("flows that are not a mapping", () => {
+		const flows = BUNDLE.slice(BUNDLE.indexOf("flows:\n"));
+		expect(found(yaml(flows, "flows: [ship]\n")).map((f) => f.message)).toEqual([
+			"`flows` must be a mapping",
+		]);
+	});
+
+	test("the findings of a flow carry its name", () => {
+		const findings = found(yaml("        outcomes: { done: review }\n", ""));
+		expect(findings.length).toBeGreaterThan(0);
+		for (const finding of findings) expect(finding.flow).toBe("ship");
+	});
+
+	test("what the lead needs at a step is checked against the choices", () => {
+		const step = "        reads: [{ artifact: findings, optional: true }]\n";
+		const needs = (list: string) => found(yaml(step, `${step}        needs: [${list}]\n`));
+		expect(needs("TaskStorage.create")).toEqual([]);
+		expect(needs("TaskStorage.claim")).toEqual([
+			{
+				rule: "missing-verb",
+				severity: "error",
+				flow: "ship",
+				message: "the lead at build does `TaskStorage.claim`, which `tasks` has no sentence for",
+			},
+		]);
+		expect(needs("Memory.read").map((f) => [f.rule, f.message])).toEqual([
+			["no-provider", "the lead at build uses `Memory`, and `concepts` has no entry for it"],
+		]);
+		expect(needs("Harness.subagents")).toEqual([]);
+		expect(
+			needs("TaskStorage, Memory.recall, Storage.read").map((f) => [f.rule, f.message]),
+		).toEqual([
+			[
+				"unknown-term",
+				"the lead at build needs `TaskStorage`: a need is written `<Concept>.<verb or trait>`",
+			],
+			[
+				"unknown-term",
+				"the lead at build needs `Memory.recall`: `Memory` has no verb or trait `recall`",
+			],
+			[
+				"unknown-term",
+				"the lead at build needs `Storage.read`: `Storage` is not a concept of the language",
+			],
+		]);
+	});
+});
+
+describe("artifacts kept between runs", () => {
+	const kept = (entry: string) => found({ yaml: `${BUNDLE}artifacts:\n  lessons: ${entry}\n` });
+
+	test("need a kind and the scope", () => {
+		const message = "artifacts.lessons: needs `kind` and `scope: cross-run`";
+		expect(said(kept("{ kind: lessons }"), "invalid")).toEqual([message]);
+		expect(said(kept("{ scope: cross-run }"), "invalid")).toEqual([message]);
+		expect(said(kept("lessons"), "invalid")).toEqual([message]);
+	});
+
+	test("have a kind of the language", () => {
+		expect(said(kept("{ kind: wisdom, scope: cross-run }"), "unknown-term")).toEqual([
+			"artifacts.lessons: `wisdom` is not an artifact kind",
+		]);
+	});
+});
+
+describe("keys written twice", () => {
+	test("are found directly under the section, whatever their quotes", () => {
+		const text = [
+			"blocks:",
+			"  # a comment",
+			"  plan: { from: a/plan }",
+			'  "plan":',
+			"    from: a/other",
+			"",
+			"  review: { origin: imported }",
+			"  'review': { origin: imported }",
+			"  a/b: 1",
+			"  a/b: 2",
+			"flows:",
+			"  plan: {}",
+		].join("\n");
+		expect(repeated(text, "blocks")).toEqual(["plan", "review", "a/b"]);
+		expect(repeated(text, "flows")).toEqual([]);
+		expect(repeated(text, "concepts")).toEqual([]);
+	});
+
+	test("deeper keys of the same name are not counted", () => {
+		const text = "blocks:\n  plan:\n    does: x\n  execute:\n    does: y\n    plan: z\n";
+		expect(repeated(text, "blocks")).toEqual([]);
+	});
+
+	test("a section written on one line has nothing under it", () => {
+		expect(repeated("blocks: { plan: {}, plan: {} }\n", "blocks")).toEqual([]);
 	});
 });

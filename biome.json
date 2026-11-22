@@ -21,6 +21,18 @@
 			"preset": "recommended"
 		}
 	},
+	"overrides": [
+		{
+			"includes": ["packages/check/tests/**"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noThenProperty": "off"
+					}
+				}
+			}
+		}
+	],
 	"assist": {
 		"enabled": true,
 		"actions": {

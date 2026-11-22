@@ -1,7 +1,14 @@
-import { ALL_DONE, cardRef, NEXT_CHILD } from "./load.ts";
-import type { Annotation, Edge, Finding, Flat } from "./types.ts";
+import { norm } from "./block.ts";
+import { ALL_DONE, base, COUNTERS, NEXT_CHILD } from "./flow.ts";
+import type { BundleBlock, Edge, Finding, Flat } from "./types.ts";
 
-const norm = (outcome: string) => outcome.toLowerCase().replaceAll("_", "-");
+/** What the analysis of a flow takes from the bundle around it. */
+export type FlowChecks = {
+	blocks: Map<string, BundleBlock>;
+	/** Checks one `<Concept>.<verb or trait>` against the bundle's choices. */
+	need: (need: string, who: string) => Finding[];
+};
+
 const step = (edge: Edge) => `${edge.from} -(${edge.outcome})-> ${edge.to}`;
 
 /** Shortest path from `start` over states (node, flag), or undefined. `flag` follows `next`. */
@@ -104,8 +111,8 @@ function cycle(inside: Set<string>, edges: Edge[]): string[] | undefined {
 	return undefined;
 }
 
-/** Checks one expanded stack. `annotations` adds the checks that need the blocks' own declarations. */
-export function analyze(flat: Flat, annotations?: Map<string, Annotation>): Finding[] {
+/** Checks one flow with its levels written out. */
+export function analyze(flat: Flat, context: FlowChecks): Finding[] {
 	const findings: Finding[] = [];
 	const add = (
 		rule: string,
@@ -113,7 +120,7 @@ export function analyze(flat: Flat, annotations?: Map<string, Annotation>): Find
 		trace?: string[],
 		severity: "error" | "warning" = "error",
 	) => {
-		findings.push({ rule, severity, message, trace });
+		findings.push({ rule, severity, flow: flat.name, message, trace });
 	};
 	const ends = new Set(flat.ends);
 	const out = new Map<string, Edge[]>();
@@ -293,139 +300,109 @@ export function analyze(flat: Flat, annotations?: Map<string, Annotation>): Find
 		break;
 	}
 
-	// Capabilities the steps need from the components the stack uses.
-	const emulated = new Map<string, string[]>();
-	const needs = (need: string, where: string) => {
-		const [componentId = "", capability = ""] = need.split(".");
-		const component = flat.components.get(componentId);
-		const level = component?.capabilities.get(capability);
-		if (!component)
-			add(
-				"missing-capability",
-				`${where} needs \`${need}\`, and the stack has no component \`${componentId}\``,
-			);
-		else if (level === undefined)
-			add(
-				"missing-capability",
-				`${where} needs \`${need}\`, which \`${component.name}\` does not declare`,
-			);
-		else if (level === "missing")
-			add(
-				"missing-capability",
-				`${where} needs \`${need}\`, which \`${component.name}\` cannot provide`,
-			);
-		else if (level === "emulated") emulated.set(need, [...(emulated.get(need) ?? []), where]);
-	};
-	for (const node of live) for (const need of node.needs) needs(need, node.id);
-
-	// Whole-stack rules.
-	const routers = [...flat.blocks].filter(([, block]) => block.role === "router");
-	if (routers.length > 1)
-		add(
-			"two-routers",
-			`more than one block routes the stack: ${routers.map(([id]) => id).join(", ")}`,
-		);
-	const group = (
-		key: (block: { as: string; kind: string; event?: string }) => string | undefined,
-	) => {
-		const groups = new Map<string, string[]>();
-		for (const [id, block] of flat.blocks) {
-			const k = key(block);
-			if (k !== undefined) groups.set(k, [...(groups.get(k) ?? []), id]);
+	// What the lead's own part of a step needs from the concepts the bundle chose.
+	for (const node of flat.nodes.values()) {
+		for (const need of node.needs) {
+			for (const finding of context.need(need, `the lead at ${node.id}`))
+				findings.push({ ...finding, flow: flat.name });
 		}
-		return [...groups].filter(([, members]) => members.length > 1);
-	};
-	for (const [name, members] of group((b) => b.as))
-		add("name-clash", `${members.join(" and ")} are both installed as \`${name}\``);
-	for (const [event, members] of group((b) => (b.kind === "hook" ? b.event : undefined))) {
-		add("hook-clash", `${members.join(" and ")} both hook the event \`${event}\``);
 	}
 
-	// Checks against the blocks' own annotations.
-	if (annotations) {
-		for (const id of flat.blocks.keys()) {
-			const annotation = annotations.get(id);
-			if (!annotation) {
-				add("invalid", `block \`${id}\` has no annotation`);
-				continue;
-			}
-			for (const touch of annotation.touches) {
-				const ref = cardRef(touch.component);
-				if (!ref)
-					add(
-						"invalid",
-						`block \`${id}\`: a touch names \`${touch.component}\`, which is not a card path (\`components/<Type>/<name>.md\`)`,
-					);
-				else if (!flat.components.has(ref.type))
-					add(
-						"invalid",
-						`block \`${id}\` was written for ${ref.type} \`${ref.name}\`, and the stack uses no component of type \`${ref.type}\``,
-					);
-			}
-			for (const need of annotation.needs) needs(need, `block \`${id}\``);
-		}
-		for (const node of live) {
-			const annotation = node.block ? annotations.get(node.block) : undefined;
-			if (!annotation) continue;
-			const part = node.part ? annotation.parts.get(node.part) : undefined;
-			if (node.part && !part) {
-				add(
-					"invalid",
-					`${node.id} uses part \`${node.part}\` of \`${node.block}\`, which its annotation does not define`,
-				);
-				continue;
-			}
-			const declared = new Set((part?.outcomes ?? annotation.outcomes).map(norm));
-			const routed = new Set(
-				(out.get(node.id) ?? []).map((edge) =>
-					edge.outcome === ALL_DONE ? norm(flat.ends[0] ?? "") : norm(edge.outcome),
-				),
+	// Each cell against the block it uses.
+	const pathTo = (id: string) =>
+		witness(
+			flat,
+			out,
+			false,
+			() => false,
+			(node) => node === id,
+		);
+	for (const node of flat.nodes.values()) {
+		if (!node.block) continue;
+		const def = context.blocks.get(node.block)?.def;
+		if (!def) continue;
+		const name = `\`${node.block}${node.part ? `#${node.part}` : ""}\``;
+		const outcomes = node.part ? def.parts.get(node.part) : def.outcomes;
+		if (!outcomes) {
+			add(
+				"invalid",
+				`${node.id} uses part \`${node.part}\` of \`${node.block}\`, which the block does not define`,
 			);
-			for (const outcome of declared) {
-				if (!routed.has(outcome))
+			continue;
+		}
+		for (const [what, given, declared] of [
+			["an input", node.inputs, def.inputs],
+			["an output", node.outputs, def.outputs],
+		] as const) {
+			for (const [slot, artifact] of given) {
+				const io = declared.get(slot);
+				if (!io) {
 					add(
-						"unrouted-outcome",
-						`\`${node.block}${node.part ? `#${node.part}` : ""}\` can end \`${outcome}\`, and ${node.id} does not route it`,
+						"invalid",
+						`${node.id} gives \`${artifact}\` for \`${slot}\`, which is not ${what} of \`${node.block}\``,
 					);
-			}
-			if (declared.size === 0) continue;
-			for (const outcome of routed) {
-				if (outcome !== NEXT_CHILD && !declared.has(outcome)) {
-					add(
-						"undeclared-outcome",
-						`${node.id} routes \`${outcome}\`, which \`${node.block}\` does not say it can end with`,
-						undefined,
-						"warning",
-					);
+					continue;
 				}
+				const kind = flat.kinds.get(base(artifact));
+				if (kind !== undefined && kind !== io.kind)
+					add(
+						"artifact-kind",
+						`${node.id} gives \`${artifact}\`, a ${kind}, for \`${slot}\` of \`${node.block}\`, which is a ${io.kind}`,
+						pathTo(node.id),
+					);
 			}
 		}
-	}
-	for (const [need, where] of emulated) {
-		add(
-			"emulated-capability",
-			`\`${need}\` is emulated by \`${flat.components.get(need.split(".")[0] ?? "")?.name}\` (needed by ${[...new Set(where)].join(", ")})`,
-			undefined,
-			"warning",
-		);
-	}
-	// Where the artifacts are kept: once the stack gives paths, every artifact a step writes has one.
-	if (flat.paths.size > 0) {
-		const written = new Map<string, string>();
-		for (const node of live) {
-			for (const artifact of node.writes) {
-				if (!written.has(artifact)) written.set(artifact, node.id);
-			}
-		}
-		for (const [artifact, where] of written) {
-			if (!flat.paths.has(artifact) && !flat.paths.has(artifact.split("@")[0] ?? ""))
+		// A part is a passage of the block used on its own: the block's inputs are not asked of it.
+		for (const [slot, io] of node.part ? [] : def.inputs) {
+			if (io.required && !node.inputs.has(slot))
 				add(
-					"no-path",
-					`\`${artifact}\` is written by ${where}, and \`files\` gives it no path`,
+					"missing-input",
+					`${node.id} gives no artifact for \`${slot}\`, a required input of \`${node.block}\``,
+					pathTo(node.id),
+				);
+		}
+		const declared = new Set(outcomes.map(norm));
+		const own = new Set(
+			(out.get(node.id) ?? [])
+				.filter((edge) => edge.outcome !== NEXT_CHILD && edge.outcome !== ALL_DONE)
+				.map((edge) => norm(edge.outcome)),
+		);
+		// `children` routes how the level below ended; the block's ending of that name is covered by it.
+		const routed = new Set([...own, ...node.childRoutes.map(norm)]);
+		for (const outcome of declared) {
+			if (!routed.has(outcome))
+				add(
+					"unrouted-outcome",
+					`${name} can end \`${outcome}\`, and ${node.id} does not route it`,
+					pathTo(node.id),
+				);
+		}
+		if (declared.size === 0) continue;
+		for (const outcome of own) {
+			if (!declared.has(outcome))
+				add(
+					"undeclared-outcome",
+					`${node.id} routes \`${outcome}\`, which ${name} does not say it can end with`,
 					undefined,
 					"warning",
 				);
 		}
 	}
+
+	// Where the artifacts are kept: every artifact a step writes has a place.
+	const kept = new Map<string, string>();
+	for (const node of flat.nodes.values()) {
+		for (const artifact of node.writes) if (!kept.has(artifact)) kept.set(artifact, node.id);
+	}
+	for (const [artifact, where] of kept) {
+		if (!flat.paths.has(artifact) && !flat.paths.has(base(artifact)))
+			add("no-path", `\`${artifact}\` is written by ${where}, and \`files\` gives it no place`);
+	}
+	const counted = flat.edges.find((edge) => edge.bound?.kind === "max");
+	if (counted && !flat.paths.has(COUNTERS))
+		add(
+			"no-path",
+			`${counted.from}.${counted.outcome} is counted, and \`files.${COUNTERS}\` gives the counts no place`,
+		);
 	return findings;
 }
